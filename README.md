@@ -65,6 +65,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id, model, perms, and cwd to every response.
 - Broker auto-clears any webhook on startup and refuses to run if another broker is already active.
 - Multi-line Telegram messages are treated as separate commands (one per line).
+- If a target agent is offline, the broker fails fast (see `AGENT_CONNECT_TIMEOUT_SEC` in `broker.env`).
 
 ## Voice-to-text (optional)
 You can send a Telegram voice message and have it transcribed and routed as a command.

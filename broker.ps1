@@ -40,6 +40,7 @@ function Get-Config {
     DefaultTarget = 'pc'
     AgentSecret = ''
     AgentTimeoutSec = 300
+    AgentConnectTimeoutSec = 3
     PollTimeoutSec = 20
     MaxMessageChars = 3500
     BotLog = (Join-Path $PSScriptRoot 'broker.log')
@@ -59,6 +60,7 @@ function Get-Config {
   if ($env:DEFAULT_TARGET) { $cfg.DefaultTarget = $env:DEFAULT_TARGET }
   if ($env:AGENT_SECRET) { $cfg.AgentSecret = $env:AGENT_SECRET }
   if ($env:AGENT_TIMEOUT_SEC) { $cfg.AgentTimeoutSec = [int]$env:AGENT_TIMEOUT_SEC }
+  if ($env:AGENT_CONNECT_TIMEOUT_SEC) { $cfg.AgentConnectTimeoutSec = [int]$env:AGENT_CONNECT_TIMEOUT_SEC }
   if ($env:POLL_TIMEOUT_SEC) { $cfg.PollTimeoutSec = [int]$env:POLL_TIMEOUT_SEC }
   if ($env:MAX_OUTPUT_CHARS) { $cfg.MaxMessageChars = [int]$env:MAX_OUTPUT_CHARS }
   if ($env:STT_CMD) { $cfg.SttCmd = $env:STT_CMD }
@@ -222,7 +224,12 @@ function Send-AgentRequest {
 
   try {
     $client = New-Object System.Net.Sockets.TcpClient
-    $client.Connect($targetHost, $port)
+    $connectMs = [Math]::Max(1, [int]$cfg.AgentConnectTimeoutSec) * 1000
+    $connectTask = $client.ConnectAsync($targetHost, $port)
+    if (-not $connectTask.Wait($connectMs)) {
+      try { $client.Close() } catch {}
+      return @{ ok = $false; error = "Connect timeout after $($cfg.AgentConnectTimeoutSec)s ($($targetHost):$port)" }
+    }
     $timeoutMs = [Math]::Max(5, $cfg.AgentTimeoutSec) * 1000
     $client.ReceiveTimeout = $timeoutMs
     $client.SendTimeout = $timeoutMs
