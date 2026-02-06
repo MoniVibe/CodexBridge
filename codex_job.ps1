@@ -62,6 +62,11 @@ $threadId = $null
 $err = $null
 
 try {
+  # Create placeholder files so codexlast can tail immediately.
+  try { New-Item -ItemType File -Force -Path $OutFile | Out-Null } catch {}
+  try { New-Item -ItemType File -Force -Path $StdoutPath | Out-Null } catch {}
+  try { New-Item -ItemType File -Force -Path $StderrPath | Out-Null } catch {}
+
   if (-not (Test-Path -LiteralPath $PromptPath)) { throw "PromptPath not found: $PromptPath" }
   $prompt = Get-Content -LiteralPath $PromptPath -Raw -ErrorAction Stop
 
@@ -96,8 +101,23 @@ try {
   $proc.StartInfo = $psi
   $null = $proc.Start()
 
-  $outTask = $proc.StandardOutput.ReadToEndAsync()
-  $errTask = $proc.StandardError.ReadToEndAsync()
+  $actionOut = {
+    param($sender, $eventArgs)
+    if ($eventArgs.Data -ne $null) {
+      try { Add-Content -LiteralPath $using:StdoutPath -Value $eventArgs.Data } catch {}
+    }
+  }
+  $actionErr = {
+    param($sender, $eventArgs)
+    if ($eventArgs.Data -ne $null) {
+      try { Add-Content -LiteralPath $using:StderrPath -Value $eventArgs.Data } catch {}
+    }
+  }
+
+  Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $actionOut | Out-Null
+  Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $actionErr | Out-Null
+  $proc.BeginOutputReadLine()
+  $proc.BeginErrorReadLine()
 
   $proc.StandardInput.Write($prompt)
   $proc.StandardInput.Close()
@@ -108,16 +128,11 @@ try {
     throw "codex exec timed out after ${TimeoutSec}s"
   }
 
-  $null = [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 5000)
-  $stdoutText = $outTask.Result
-  $stderrText = $errTask.Result
-
-  if ($stdoutText) { Set-Content -LiteralPath $StdoutPath -Value $stdoutText }
-  if ($stderrText) { Set-Content -LiteralPath $StderrPath -Value $stderrText }
-
   $combined = ''
-  if ($stdoutText) { $combined += $stdoutText }
-  if ($stderrText) { $combined += $stderrText }
+  try {
+    if (Test-Path -LiteralPath $StdoutPath) { $combined += (Get-Content -LiteralPath $StdoutPath -Raw -ErrorAction SilentlyContinue) }
+    if (Test-Path -LiteralPath $StderrPath) { $combined += (Get-Content -LiteralPath $StderrPath -Raw -ErrorAction SilentlyContinue) }
+  } catch {}
 
   if ($combined -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
     $threadId = $Matches[1]
@@ -150,4 +165,3 @@ $result = [ordered]@{
 
 try { $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultPath } catch {}
 try { Set-Content -LiteralPath $ExitPath -Value $exitCode } catch {}
-
