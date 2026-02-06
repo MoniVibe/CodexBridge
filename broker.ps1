@@ -323,7 +323,7 @@ function Is-KnownCommandOrTarget {
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
     'help','status','run','last','tail','get','codex','codexnew','codexfresh',
-    'codexsession','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
+    'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
   )
   return $known -contains $token
 }
@@ -403,7 +403,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexmodel [model] [reset] | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel | codexmodel [model] [reset] | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -501,6 +501,25 @@ function Handle-Command {
     'codexsession' {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.session' }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'codexjob' {
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.job' }
+      if (-not $resp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp); return }
+      $job = $resp.result.job
+      if (-not $job) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'No codex job.'; return }
+      $msg = "Codex job: id=$($job.id) running=$($job.running) pid=$($job.pid) exit_code=$($job.exit_code) thread_id=$($job.thread_id)"
+      if ($job.error) { $msg += "`nerror: $($job.error)" }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $msg
+      return
+    }
+    'codexcancel' {
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.cancel' }
+      if (-not $resp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp); return }
+      $msg = "Cancelled: $($resp.result.cancelled)"
+      $job = $resp.result.job
+      if ($job) { $msg += "`nCodex job: id=$($job.id) running=$($job.running) pid=$($job.pid)" }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
     'codexmodel' {

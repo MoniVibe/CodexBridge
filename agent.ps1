@@ -40,6 +40,7 @@ function Get-Config {
     LogDir = (Join-Path $PSScriptRoot 'logs')
     StateFile = (Join-Path $PSScriptRoot 'agent_state.json')
     RunnerPath = (Join-Path $PSScriptRoot 'runner.ps1')
+    CodexJobScript = (Join-Path $PSScriptRoot 'codex_job.ps1')
     CodexBaseCmd = 'codex -a never --sandbox workspace-write --no-alt-screen --skip-git-repo-check'
     CodexTimeoutSec = 300
     CodexWaitSec = 15
@@ -52,6 +53,8 @@ function Get-Config {
     ClientTimeoutSec = 300
     CodexDangerous = $true
     CodexModel = ''
+    CodexAsync = $true
+    CodexJobTailLines = 60
     CodexAutoInit = $false
     CodexInitPrompt = 'Initialize session. Reply "ready".'
     CodexAppendSession = $true
@@ -82,12 +85,16 @@ function Get-Config {
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
   if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
+  if ($env:CODEX_ASYNC) { $cfg.CodexAsync = ($env:CODEX_ASYNC -match '^(1|true|yes)$') }
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
   if ($env:CODEX_APPEND_SESSION) { $cfg.CodexAppendSession = ($env:CODEX_APPEND_SESSION -match '^(1|true|yes)$') }
 
   if (-not (Test-Path -LiteralPath $cfg.RunnerPath)) {
     throw "runner.ps1 missing at $($cfg.RunnerPath)"
+  }
+  if ($cfg.CodexAsync -and -not (Test-Path -LiteralPath $cfg.CodexJobScript)) {
+    throw "codex_job.ps1 missing at $($cfg.CodexJobScript)"
   }
 
   New-Item -ItemType Directory -Force -Path $cfg.LogDir | Out-Null
@@ -311,11 +318,37 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_id' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_pid' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_prompt' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_outfile' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_stdout' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_stderr' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_result' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_exit' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_started' -Value $null
       if (-not $obj.codex_session_id) { $obj.codex_has_session = $false }
       return $obj
     } catch {}
   }
-  $obj = [ordered]@{ last_job_id = $null; codex_has_session = $false; codex_last_log = $null; codex_session_id = $null; codex_console_offset = 0; codex_cwd = $null; codex_model = $null }
+  $obj = [ordered]@{
+    last_job_id = $null
+    codex_has_session = $false
+    codex_last_log = $null
+    codex_session_id = $null
+    codex_console_offset = 0
+    codex_cwd = $null
+    codex_model = $null
+    codex_job_id = $null
+    codex_job_pid = $null
+    codex_job_prompt = $null
+    codex_job_outfile = $null
+    codex_job_stdout = $null
+    codex_job_stderr = $null
+    codex_job_result = $null
+    codex_job_exit = $null
+    codex_job_started = $null
+  }
   return $obj
 }
 
@@ -481,6 +514,179 @@ function Invoke-CodexExec {
 
   return @{ output = $output; log = $logPath; job_id = $jobId }
 }
+
+function Get-ActiveCodexModel {
+  param($cfg, $state)
+  if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { return $state.codex_model }
+  if ($cfg.CodexModel) { return $cfg.CodexModel }
+  return ''
+}
+
+function Test-ProcessRunning {
+  param([object]$Pid)
+  if (-not $Pid) { return $false }
+  try {
+    $p = Get-Process -Id ([int]$Pid) -ErrorAction SilentlyContinue
+    return ($null -ne $p)
+  } catch {
+    return $false
+  }
+}
+
+function Get-CodexJobInfo {
+  param($cfg, $state)
+
+  $jobId = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_id') { $jobId = $state.codex_job_id }
+  if (-not $jobId) { return $null }
+
+  $pid = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_pid') { $pid = $state.codex_job_pid }
+  $running = Test-ProcessRunning -Pid $pid
+
+  $exitCode = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_exit' -and $state.codex_job_exit -and (Test-Path -LiteralPath $state.codex_job_exit)) {
+    $raw = (Get-Content -LiteralPath $state.codex_job_exit -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($raw -match '^-?\d+$') { $exitCode = [int]$raw }
+  }
+
+  $res = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_result' -and $state.codex_job_result -and (Test-Path -LiteralPath $state.codex_job_result)) {
+    try { $res = Get-Content -LiteralPath $state.codex_job_result -Raw | ConvertFrom-Json } catch {}
+  }
+
+  return [ordered]@{
+    id = $jobId
+    pid = $pid
+    running = $running
+    started = $state.codex_job_started
+    exit_code = $exitCode
+    thread_id = if ($res -and $res.thread_id) { $res.thread_id } else { $null }
+    error = if ($res -and -not $res.ok) { $res.error } else { $null }
+    out_file = $state.codex_job_outfile
+    stdout_file = $state.codex_job_stdout
+    stderr_file = $state.codex_job_stderr
+    result_file = $state.codex_job_result
+  }
+}
+
+function Refresh-CodexJobState {
+  param($cfg, $state)
+
+  $info = Get-CodexJobInfo -cfg $cfg -state $state
+  if (-not $info) { return $null }
+
+  if ($info.running) { return $info }
+
+  # If the job is done and we haven't promoted its output into codex_last_log/session yet, do it now.
+  $jobId = $info.id
+  $outFile = $info.out_file
+  $threadId = $info.thread_id
+  if ($threadId -and ($state.codex_session_id -ne $threadId)) {
+    $state.codex_session_id = $threadId
+    $state.codex_has_session = $true
+  }
+
+  $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
+  if (-not $state.codex_last_log -or ($state.codex_last_log -ne $finalLog) -or -not (Test-Path -LiteralPath $finalLog)) {
+    $output = $null
+    if ($outFile -and (Test-Path -LiteralPath $outFile)) {
+      $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
+    }
+    if (-not $output) { $output = '(no output)' }
+    $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
+    try { Set-Content -LiteralPath $finalLog -Value $output } catch {}
+    $state.codex_last_log = $finalLog
+  }
+
+  # Clear PID so we don't treat the job as running again after it exits.
+  $state.codex_job_pid = $null
+  Save-State -cfg $cfg -state $state
+
+  return (Get-CodexJobInfo -cfg $cfg -state $state)
+}
+
+function Start-CodexExecJob {
+  param($cfg, $state, [string]$Prompt, [bool]$Resume)
+
+  $existing = Get-CodexJobInfo -cfg $cfg -state $state
+  if ($existing -and $existing.running) {
+    throw "Codex job already running (job_id=$($existing.id), pid=$($existing.pid)). Use codexlast or codexcancel."
+  }
+
+  $jobId = New-JobId
+  $promptPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.prompt.txt"
+  $outFile = Join-Path $cfg.LogDir "codex_exec_${jobId}.out"
+  $stdoutPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.stdout.log"
+  $stderrPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.stderr.log"
+  $resultPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.result.json"
+  $exitPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.exit"
+
+  Set-Content -LiteralPath $promptPath -Value $Prompt
+
+  $model = Get-ActiveCodexModel -cfg $cfg -state $state
+
+  $workDir = $cfg.DefaultCwd
+  if ($cfg.CodexCwd -and (Test-Path -LiteralPath $cfg.CodexCwd)) { $workDir = $cfg.CodexCwd }
+
+  $resumeThread = ''
+  if ($Resume -and $state.codex_session_id) { $resumeThread = $state.codex_session_id }
+
+  $argList = @(
+    '-NoProfile',
+    '-File', $cfg.CodexJobScript,
+    '-PromptPath', $promptPath,
+    '-OutFile', $outFile,
+    '-StdoutPath', $stdoutPath,
+    '-StderrPath', $stderrPath,
+    '-ResultPath', $resultPath,
+    '-ExitPath', $exitPath,
+    '-WorkingDir', $workDir,
+    '-TimeoutSec', $cfg.CodexTimeoutSec
+  )
+  if ($resumeThread) { $argList += @('-ResumeThreadId', $resumeThread) }
+  if ($model) { $argList += @('-Model', $model) }
+  if ($cfg.CodexDangerous) { $argList += '-Dangerous' }
+
+  $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $argList -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
+
+  $state.codex_job_id = $jobId
+  $state.codex_job_pid = $proc.Id
+  $state.codex_job_prompt = $promptPath
+  $state.codex_job_outfile = $outFile
+  $state.codex_job_stdout = $stdoutPath
+  $state.codex_job_stderr = $stderrPath
+  $state.codex_job_result = $resultPath
+  $state.codex_job_exit = $exitPath
+  $state.codex_job_started = (Get-Date).ToString('o')
+  $state.codex_cwd = $workDir
+  Save-State -cfg $cfg -state $state
+
+  $modelLabel = if ($model) { $model } else { 'default' }
+  $resumeLabel = if ($resumeThread) { "resume $resumeThread" } else { 'new thread' }
+  $msg = "Queued codex job $jobId ($resumeLabel, model=$modelLabel). Use 'codexlast' to check output."
+
+  return @{ output = $msg; job_id = $jobId; pid = $proc.Id }
+}
+
+function Cancel-CodexJob {
+  param($cfg, $state)
+  $info = Get-CodexJobInfo -cfg $cfg -state $state
+  if (-not $info) { return $false }
+  if ($info.running -and $info.pid) {
+    try { Stop-Process -Id ([int]$info.pid) -Force } catch {}
+  }
+  if ($state.codex_job_exit) {
+    try { Set-Content -LiteralPath $state.codex_job_exit -Value -1 } catch {}
+  }
+  if ($state.codex_job_result) {
+    $res = [ordered]@{ ok = $false; error = 'cancelled'; thread_id = $null }
+    try { $res | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $state.codex_job_result } catch {}
+  }
+  $state.codex_job_pid = $null
+  Save-State -cfg $cfg -state $state
+  return $true
+}
 function Start-CodexSession {
   param($cfg, [string]$SessionId)
 
@@ -635,7 +841,9 @@ while ($true) {
         $activeModel = $null
         if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $activeModel = $state.codex_model }
         elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
-        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel } }
+        $null = Refresh-CodexJobState -cfg $cfg -state $state
+        $job = Get-CodexJobInfo -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel; codex_job = $job } }
       }
       'run' {
         if (-not $req.cmd) { throw 'cmd missing.' }
@@ -675,16 +883,26 @@ while ($true) {
           $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
           $resp = @{ ok = $true; result = @{ output = $outText } }
         } else {
+          $null = Refresh-CodexJobState -cfg $cfg -state $state
           $resume = $false
           if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $resume = $true }
-          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
+          if ($cfg.CodexAsync) {
+            $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
+          } else {
+            $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
+          }
           $resp = @{ ok = $true; result = $out }
         }
       }
       'codex.new' {
         if ($cfg.CodexMode -eq 'console') { throw 'codexnew not supported in console mode.' }
         if (-not $req.prompt) { throw 'prompt missing.' }
-        $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        $null = Refresh-CodexJobState -cfg $cfg -state $state
+        if ($cfg.CodexAsync) {
+          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        } else {
+          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        }
         $resp = @{ ok = $true; result = $out }
       }
       'codex.start' {
@@ -701,7 +919,18 @@ while ($true) {
         $resp = @{ ok = $true; result = @{ sessions = @(@{ id = 'default'; running = $state.codex_has_session }) } }
       }
       'codex.session' {
+        $null = Refresh-CodexJobState -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
+      }
+      'codex.job' {
+        $job = Refresh-CodexJobState -cfg $cfg -state $state
+        if (-not $job) { $job = Get-CodexJobInfo -cfg $cfg -state $state }
+        $resp = @{ ok = $true; result = @{ job = $job } }
+      }
+      'codex.cancel' {
+        $ok = Cancel-CodexJob -cfg $cfg -state $state
+        $job = Get-CodexJobInfo -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ cancelled = $ok; job = $job } }
       }
       'codex.model.get' {
         $activeModel = $null
@@ -719,9 +948,24 @@ while ($true) {
         if ($req.reset -ne $null) {
           $doReset = ([string]$req.reset -match '^(1|true|yes)$')
         }
+
+        $job = Get-CodexJobInfo -cfg $cfg -state $state
+        if ($job -and $job.running -and -not $doReset) {
+          throw "Codex job running (job_id=$($job.id)). Use reset to cancel+clear first."
+        }
         if ($doReset) {
+          $null = Cancel-CodexJob -cfg $cfg -state $state
           $state.codex_session_id = $null
           $state.codex_has_session = $false
+          $state.codex_job_id = $null
+          $state.codex_job_pid = $null
+          $state.codex_job_prompt = $null
+          $state.codex_job_outfile = $null
+          $state.codex_job_stdout = $null
+          $state.codex_job_stderr = $null
+          $state.codex_job_result = $null
+          $state.codex_job_exit = $null
+          $state.codex_job_started = $null
         }
 
         Save-State -cfg $cfg -state $state
@@ -729,14 +973,26 @@ while ($true) {
       }
       'codex.use' {
         if (-not $req.session) { throw 'session missing.' }
+        $job = Get-CodexJobInfo -cfg $cfg -state $state
+        if ($job -and $job.running) { throw "Codex job running (job_id=$($job.id)). Cancel it first." }
         $state.codex_session_id = $req.session
         $state.codex_has_session = $true
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
       }
       'codex.reset' {
+        $null = Cancel-CodexJob -cfg $cfg -state $state
         $state.codex_session_id = $null
         $state.codex_has_session = $false
+        $state.codex_job_id = $null
+        $state.codex_job_pid = $null
+        $state.codex_job_prompt = $null
+        $state.codex_job_outfile = $null
+        $state.codex_job_stdout = $null
+        $state.codex_job_stderr = $null
+        $state.codex_job_result = $null
+        $state.codex_job_exit = $null
+        $state.codex_job_started = $null
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ session = $null } }
       }
@@ -746,10 +1002,28 @@ while ($true) {
           $tail = Get-LogTail -LogPath $cfg.CodexTranscript -Lines $lines
           $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
         } else {
-          if (-not $state.codex_last_log) { throw 'No codex output yet.' }
-          $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
-          $tail = Get-LogTail -LogPath $state.codex_last_log -Lines $lines
-          $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
+          $job = Refresh-CodexJobState -cfg $cfg -state $state
+          if ($job -and $job.running) {
+            $tailLines = if ($req.lines) { [int]$req.lines } else { $cfg.CodexJobTailLines }
+            $parts = New-Object System.Collections.Generic.List[string]
+            $parts.Add(("Codex job running: id={0} pid={1} started={2}" -f $job.id, $job.pid, $job.started))
+            if ($job.stdout_file -and (Test-Path -LiteralPath $job.stdout_file)) {
+              $parts.Add('')
+              $parts.Add('--- stdout (tail) ---')
+              $parts.Add((Get-LogTail -LogPath $job.stdout_file -Lines $tailLines))
+            }
+            if ($job.stderr_file -and (Test-Path -LiteralPath $job.stderr_file)) {
+              $parts.Add('')
+              $parts.Add('--- stderr (tail) ---')
+              $parts.Add((Get-LogTail -LogPath $job.stderr_file -Lines $tailLines))
+            }
+            $resp = @{ ok = $true; result = @{ session = 'default'; output = ($parts -join "`n") } }
+          } else {
+            if (-not $state.codex_last_log) { throw 'No codex output yet.' }
+            $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
+            $tail = Get-LogTail -LogPath $state.codex_last_log -Lines $lines
+            $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
+          }
         }
       }
       default {

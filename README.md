@@ -40,6 +40,8 @@ Use `<target>` as `pc` or `lap` (from `TARGET_*` in `broker.env`).
 - `<target> codexlast [lines]` — tail the Codex output
 - `<target> codexsession` — show stored Codex thread id
 - `<target> codexmodel [model] [reset]` — show or set the Codex model (optional `reset` clears the thread id)
+- `<target> codexjob` — show current Codex job status (async mode)
+- `<target> codexcancel` — cancel the running Codex job (async mode)
 - `<target> codexuse <thread_id>` — resume a specific thread id
 - `<target> codexreset` — clear stored thread id
 - `<target> codexfresh <prompt>` — start a fresh thread for this prompt
@@ -56,6 +58,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Headless exec mode is default (`CODEX_MODE=exec`) and does not require a window.
   - Set `CODEX_CWD` to your preferred non‑repo directory (default is `C:\dev\tri`).
   - Set `CODEX_MODEL` if you want to force a specific model (otherwise Codex CLI default is used).
+  - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive (default: on).
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
