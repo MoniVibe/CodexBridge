@@ -226,9 +226,26 @@ function Send-AgentRequest {
     $client = New-Object System.Net.Sockets.TcpClient
     $connectMs = [Math]::Max(1, [int]$cfg.AgentConnectTimeoutSec) * 1000
     $connectTask = $client.ConnectAsync($targetHost, $port)
-    if (-not $connectTask.Wait($connectMs)) {
+    try {
+      if (-not $connectTask.Wait($connectMs)) {
+        try { $client.Close() } catch {}
+        return @{ ok = $false; error = "Connect timeout after $($cfg.AgentConnectTimeoutSec)s ($($targetHost):$port)" }
+      }
+    } catch {
       try { $client.Close() } catch {}
-      return @{ ok = $false; error = "Connect timeout after $($cfg.AgentConnectTimeoutSec)s ($($targetHost):$port)" }
+      $ex = $_.Exception
+      if ($ex -and $ex.InnerException) { $ex = $ex.InnerException }
+      if ($ex -is [System.AggregateException] -and $ex.InnerExceptions.Count -gt 0) { $ex = $ex.InnerExceptions[0] }
+      $msg = if ($ex) { $ex.Message } else { $_.Exception.Message }
+      return @{ ok = $false; error = "Connect failed ($($targetHost):$port): $msg" }
+    }
+    if ($connectTask.IsFaulted) {
+      $ex = $connectTask.Exception
+      if ($ex -and $ex.InnerException) { $ex = $ex.InnerException }
+      if ($ex -is [System.AggregateException] -and $ex.InnerExceptions.Count -gt 0) { $ex = $ex.InnerExceptions[0] }
+      $msg = if ($ex) { $ex.Message } else { 'unknown connect error' }
+      try { $client.Close() } catch {}
+      return @{ ok = $false; error = "Connect failed ($($targetHost):$port): $msg" }
     }
     $timeoutMs = [Math]::Max(5, $cfg.AgentTimeoutSec) * 1000
     $client.ReceiveTimeout = $timeoutMs
@@ -330,7 +347,8 @@ function Is-KnownCommandOrTarget {
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
     'help','status','run','last','tail','get','codex','codexnew','codexfresh',
-    'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
+    'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast',
+    'cancel','job','model','session'
   )
   return $known -contains $token
 }
@@ -406,11 +424,35 @@ function Handle-Command {
     $rest = $rest1
   }
 
+  # Convenience: allow "lapcancel" (no space) by splitting known target prefixes.
+  if (-not $cfg.Targets.ContainsKey($token1Lower)) {
+    foreach ($t in $cfg.Targets.Keys) {
+      if ($token1Lower.StartsWith($t, [System.StringComparison]::InvariantCultureIgnoreCase) -and $token1Lower.Length -gt $t.Length) {
+        $suffix = $token1Lower.Substring($t.Length)
+        if (Is-KnownCommandOrTarget -cfg $cfg -Text $suffix) {
+          $target = $t
+          $cmd = $suffix
+          $rest = $rest1
+          break
+        }
+      }
+    }
+  }
+
+  # Command aliases for lazy mobile typing.
+  $aliases = @{
+    'cancel'  = 'codexcancel'
+    'job'     = 'codexjob'
+    'model'   = 'codexmodel'
+    'session' = 'codexsession'
+  }
+  if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
+
   Write-BotLog -Path $cfg.BotLog -Message ("parse: target={0} cmd={1} restLen={2}" -f $target, $cmd, ($rest | ForEach-Object { $_.Length }))
 
   switch ($cmd) {
     'help' {
-      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel | codexmodel [model] [reset] | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }

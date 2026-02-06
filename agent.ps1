@@ -674,7 +674,12 @@ function Cancel-CodexJob {
   $info = Get-CodexJobInfo -cfg $cfg -state $state
   if (-not $info) { return $false }
   if ($info.running -and $info.pid) {
-    try { Stop-Process -Id ([int]$info.pid) -Force } catch {}
+    $pidInt = [int]$info.pid
+    try {
+      & taskkill.exe /PID $pidInt /T /F | Out-Null
+    } catch {
+      try { Stop-Process -Id $pidInt -Force } catch {}
+    }
   }
   if ($state.codex_job_exit) {
     try { Set-Content -LiteralPath $state.codex_job_exit -Value -1 } catch {}
