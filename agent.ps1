@@ -344,7 +344,13 @@ function Append-SessionInfo {
   if (-not $cwd) { $cwd = $cfg.CodexCwd }
   if (-not $cwd) { $cwd = $cfg.DefaultCwd }
   $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
-  $suffix = "[telebot] codex_session_id: $sid | model: $model | reasoning: $reasoning | perms: $perms | cwd: $cwd"
+  $agentName = $cfg.Name
+  $machineName = $env:COMPUTERNAME
+  $agentLabel = if ($agentName -and $machineName -and ($agentName -ne $machineName)) { "$agentName@$machineName" }
+    elseif ($agentName) { $agentName }
+    elseif ($machineName) { $machineName }
+    else { 'unknown' }
+  $suffix = "[telebot] codex_session_id: $sid | model: $model | reasoning: $reasoning | perms: $perms | cwd: $cwd | agent: $agentLabel"
   if (-not $Text) { return $suffix }
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
