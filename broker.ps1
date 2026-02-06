@@ -40,6 +40,10 @@ function Get-Config {
     PollTimeoutSec = 20
     MaxMessageChars = 3500
     BotLog = (Join-Path $PSScriptRoot 'broker.log')
+    SttCmd = $null
+    SttTimeoutSec = 120
+    VoiceDir = (Join-Path $PSScriptRoot 'logs')
+    VoiceTarget = $null
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -54,6 +58,9 @@ function Get-Config {
   if ($env:AGENT_TIMEOUT_SEC) { $cfg.AgentTimeoutSec = [int]$env:AGENT_TIMEOUT_SEC }
   if ($env:POLL_TIMEOUT_SEC) { $cfg.PollTimeoutSec = [int]$env:POLL_TIMEOUT_SEC }
   if ($env:MAX_OUTPUT_CHARS) { $cfg.MaxMessageChars = [int]$env:MAX_OUTPUT_CHARS }
+  if ($env:STT_CMD) { $cfg.SttCmd = $env:STT_CMD }
+  if ($env:STT_TIMEOUT_SEC) { $cfg.SttTimeoutSec = [int]$env:STT_TIMEOUT_SEC }
+  if ($env:VOICE_TARGET) { $cfg.VoiceTarget = $env:VOICE_TARGET }
 
   $all = [System.Environment]::GetEnvironmentVariables()
   foreach ($key in $all.Keys) {
@@ -66,6 +73,8 @@ function Get-Config {
   if (-not $cfg.BotToken) { throw 'TG_BOT_TOKEN missing in broker.env' }
   if (-not $cfg.ChatIds -or $cfg.ChatIds.Count -eq 0) { throw 'TG_CHAT_ID missing in broker.env' }
   if ($cfg.Targets.Count -eq 0) { throw 'No targets found. Add TARGET_pc=host:port in broker.env.' }
+
+  New-Item -ItemType Directory -Force -Path $cfg.VoiceDir | Out-Null
 
   return $cfg
 }
@@ -99,6 +108,61 @@ function Send-ChunkedText {
     } else { $buffer = $candidate }
   }
   if ($buffer) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $buffer }
+}
+
+function Get-TgFile {
+  param($cfg, [string]$FileId)
+  $uri = "https://api.telegram.org/bot$($cfg.BotToken)/getFile"
+  $body = @{ file_id = $FileId }
+  try { return Invoke-RestMethod -Method Post -Uri $uri -Body $body } catch {
+    Write-BotLog -Path $cfg.BotLog -Message "getFile failed: $($_.Exception.Message)"
+    return @{ ok = $false; result = $null }
+  }
+}
+
+function Download-TgFile {
+  param($cfg, [string]$FilePath, [string]$OutPath)
+  $uri = "https://api.telegram.org/file/bot$($cfg.BotToken)/$FilePath"
+  try {
+    Invoke-WebRequest -Uri $uri -OutFile $OutPath | Out-Null
+    return $true
+  } catch {
+    Write-BotLog -Path $cfg.BotLog -Message "download failed: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Invoke-Stt {
+  param($cfg, [string]$InputPath)
+  if (-not $cfg.SttCmd) { throw 'STT_CMD not set.' }
+  $quoted = '"' + $InputPath + '"'
+  $cmd = $cfg.SttCmd.Replace('{input}', $quoted)
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'cmd.exe'
+  $psi.Arguments = "/c $cmd"
+  $psi.WorkingDirectory = $PSScriptRoot
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  $null = $proc.Start()
+
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  $timeoutMs = [Math]::Max(5, $cfg.SttTimeoutSec) * 1000
+  $exited = $proc.WaitForExit($timeoutMs)
+  if (-not $exited) {
+    try { $proc.Kill() } catch {}
+    throw "STT timed out after $($cfg.SttTimeoutSec)s"
+  }
+  $null = [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 3000)
+  $outText = $outTask.Result
+  if (-not $outText) { $outText = $errTask.Result }
+  return ($outText | Out-String).Trim()
 }
 
 function Get-TgUpdates {
@@ -199,6 +263,63 @@ function Normalize-Token {
   if (-not $t) { return '' }
   $t = $t -replace '[\.\,\:\;\!\?\)\]\}\>\"'']+$',''
   return $t
+}
+
+function Is-KnownCommandOrTarget {
+  param($cfg, [string]$Text)
+  if (-not $Text) { return $false }
+  $split = Split-FirstToken -Text $Text
+  $token = (Normalize-Token -Token $split.token).ToLowerInvariant()
+  if (-not $token) { return $false }
+  if ($cfg.Targets.ContainsKey($token)) { return $true }
+  $known = @(
+    'help','status','run','last','tail','get','codex','codexnew','codexfresh',
+    'codexsession','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
+  )
+  return $known -contains $token
+}
+
+function Build-VoiceCommand {
+  param($cfg, [string]$Text)
+  $clean = Trim-WhitespaceLike -Text $Text
+  if (-not $clean) { return $clean }
+  if (Is-KnownCommandOrTarget -cfg $cfg -Text $clean) { return $clean }
+  $target = if ($cfg.VoiceTarget) { $cfg.VoiceTarget } else { $cfg.DefaultTarget }
+  return "$target codex $clean"
+}
+
+function Handle-VoiceMessage {
+  param($cfg, [string]$ChatId, $Msg)
+
+  $voice = $Msg.voice
+  $audio = $Msg.audio
+  $fileId = $null
+  if ($voice) { $fileId = $voice.file_id }
+  elseif ($audio) { $fileId = $audio.file_id }
+  if (-not $fileId) { return }
+
+  try {
+    $fileResp = Get-TgFile -cfg $cfg -FileId $fileId
+    if (-not $fileResp.ok -or -not $fileResp.result.file_path) { throw 'Unable to fetch file path.' }
+    $filePath = $fileResp.result.file_path
+    $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $safeId = $fileId.Substring(0, [Math]::Min(10, $fileId.Length))
+    $ext = [System.IO.Path]::GetExtension($filePath)
+    if (-not $ext) { $ext = '.ogg' }
+    $local = Join-Path $cfg.VoiceDir ("voice_{0}_{1}{2}" -f $stamp, $safeId, $ext)
+    if (-not (Download-TgFile -cfg $cfg -FilePath $filePath -OutPath $local)) { throw 'Download failed.' }
+
+    $text = Invoke-Stt -cfg $cfg -InputPath $local
+    if (-not $text) { throw 'Transcription empty.' }
+
+    $cmdText = Build-VoiceCommand -cfg $cfg -Text $text
+    Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Heard: " + $text)
+    if ($cmdText) {
+      Handle-Command -cfg $cfg -ChatId $ChatId -Text $cmdText
+    }
+  } catch {
+    Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Voice failed: " + $_.Exception.Message)
+  }
 }
 function Handle-Command {
   param($cfg, [string]$ChatId, [string]$Text)
@@ -370,13 +491,16 @@ while ($true) {
       $offset = [int]$update.update_id + 1
       $msg = $update.message
       if (-not $msg) { continue }
-      if (-not $msg.text) { continue }
       $chatId = [string]$msg.chat.id
 
       if (-not (Is-AllowedChat -cfg $cfg -ChatId $chatId)) { continue }
 
       try {
-        Handle-Command -cfg $cfg -ChatId $chatId -Text $msg.text
+        if ($msg.text) {
+          Handle-Command -cfg $cfg -ChatId $chatId -Text $msg.text
+        } elseif ($msg.voice -or $msg.audio) {
+          Handle-VoiceMessage -cfg $cfg -ChatId $chatId -Msg $msg
+        }
       } catch {
         Write-BotLog -Path $cfg.BotLog -Message "Handle-Command failed: $($_.Exception.Message)"
         Send-TgMessage -cfg $cfg -ChatId $chatId -Text 'Command failed. Check broker.log on PC.'

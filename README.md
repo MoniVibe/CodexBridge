@@ -59,6 +59,24 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id, perms, and cwd to every response.
 
+## Voice-to-text (optional)
+You can send a Telegram voice message and have it transcribed and routed as a command.
+
+Set `STT_CMD` in `broker.env` (or `broker.env.example`) to a command that prints the transcript to stdout.
+Use `{input}` as a placeholder for the downloaded audio file path.
+
+Example (whisper.cpp):
+```
+STT_CMD=whisper.exe -m C:\models\ggml-base.en.bin -f {input} -otxt -of C:\dev\tri\ops\telebot\logs\stt
+```
+
+If the transcribed text does not start with a known command or target, it will be treated as:
+`<DEFAULT_TARGET> codex <transcript>`.
+
+Optional:
+- `STT_TIMEOUT_SEC` (default 120)
+- `VOICE_TARGET` (forces a target, e.g. `pc` or `lap`)
+
 ## Update + restart (optional)
 If you want a one‑shot updater that pulls latest, reapplies secrets, and restarts:
 
