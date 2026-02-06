@@ -807,7 +807,11 @@ $state = Load-State -cfg $cfg
 
 if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_session_id) {
   try {
-    $null = Invoke-CodexExec -cfg $cfg -state $state -Prompt $cfg.CodexInitPrompt -Resume:$false
+    if ($cfg.CodexAsync) {
+      $null = Start-CodexExecJob -cfg $cfg -state $state -Prompt $cfg.CodexInitPrompt -Resume:$false
+    } else {
+      $null = Invoke-CodexExec -cfg $cfg -state $state -Prompt $cfg.CodexInitPrompt -Resume:$false
+    }
   } catch {
     try { Add-Content -LiteralPath (Join-Path $cfg.LogDir 'agent_init.log') -Value ("init failed: " + $_.Exception.Message) } catch {}
   }
