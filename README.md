@@ -39,6 +39,7 @@ Use `<target>` as `pc` or `lap` (from `TARGET_*` in `broker.env`).
 - `<target> codex <prompt>` — send prompt to the active Codex session
 - `<target> codexlast [lines]` — tail the Codex output
 - `<target> codexsession` — show stored Codex thread id
+- `<target> codexmodel [model] [reset]` — show or set the Codex model (optional `reset` clears the thread id)
 - `<target> codexuse <thread_id>` — resume a specific thread id
 - `<target> codexreset` — clear stored thread id
 - `<target> codexfresh <prompt>` — start a fresh thread for this prompt
@@ -54,10 +55,11 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 ## Notes
 - Headless exec mode is default (`CODEX_MODE=exec`) and does not require a window.
   - Set `CODEX_CWD` to your preferred non‑repo directory (default is `C:\dev\tri`).
+  - Set `CODEX_MODEL` if you want to force a specific model (otherwise Codex CLI default is used).
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
-- If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id, perms, and cwd to every response.
+- If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id, model, perms, and cwd to every response.
 - Broker auto-clears any webhook on startup and refuses to run if another broker is already active.
 - Multi-line Telegram messages are treated as separate commands (one per line).
 

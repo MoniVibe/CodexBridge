@@ -323,7 +323,7 @@ function Is-KnownCommandOrTarget {
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
     'help','status','run','last','tail','get','codex','codexnew','codexfresh',
-    'codexsession','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
+    'codexsession','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast'
   )
   return $known -contains $token
 }
@@ -403,7 +403,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexmodel [model] [reset] | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -500,6 +500,26 @@ function Handle-Command {
     }
     'codexsession' {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.session' }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'codexmodel' {
+      if (-not $rest) {
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.model.get' }
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        return
+      }
+
+      $tokens = $rest -split '\s+'
+      $reset = $false
+      if ($tokens.Count -gt 1 -and $tokens[-1].ToLowerInvariant() -eq 'reset') {
+        $reset = $true
+        $tokens = $tokens[0..($tokens.Count - 2)]
+      }
+      $model = ($tokens -join ' ').Trim()
+      if ($model.ToLowerInvariant() -in @('default','clear','none')) { $model = '' }
+
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.model'; model = $model; reset = $reset }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       return
     }

@@ -51,6 +51,7 @@ function Get-Config {
     CodexSendKey = 'enter'
     ClientTimeoutSec = 300
     CodexDangerous = $true
+    CodexModel = ''
     CodexAutoInit = $false
     CodexInitPrompt = 'Initialize session. Reply "ready".'
     CodexAppendSession = $true
@@ -80,6 +81,7 @@ function Get-Config {
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
+  if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
   if ($env:CODEX_APPEND_SESSION) { $cfg.CodexAppendSession = ($env:CODEX_APPEND_SESSION -match '^(1|true|yes)$') }
@@ -193,6 +195,8 @@ function Start-CodexConsole {
     '-WorkingDir', $cfg.CodexCwd
   )
 
+  if ($cfg.CodexModel) { $args += @('-Model', $cfg.CodexModel) }
+
   $null = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd
 }
 
@@ -274,12 +278,16 @@ function Append-SessionInfo {
   $sid = $null
   if ($state.PSObject.Properties.Name -contains 'codex_session_id') { $sid = $state.codex_session_id }
   if (-not $sid) { return $Text }
+  $model = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
+  elseif ($cfg.CodexModel) { $model = $cfg.CodexModel }
+  if (-not $model) { $model = 'default' }
   $cwd = $null
   if ($state.PSObject.Properties.Name -contains 'codex_cwd') { $cwd = $state.codex_cwd }
   if (-not $cwd) { $cwd = $cfg.CodexCwd }
   if (-not $cwd) { $cwd = $cfg.DefaultCwd }
   $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
-  $suffix = "[telebot] codex_session_id: $sid | perms: $perms | cwd: $cwd"
+  $suffix = "[telebot] codex_session_id: $sid | model: $model | perms: $perms | cwd: $cwd"
   if (-not $Text) { return $suffix }
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
@@ -302,11 +310,12 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_session_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       if (-not $obj.codex_session_id) { $obj.codex_has_session = $false }
       return $obj
     } catch {}
   }
-  $obj = [ordered]@{ last_job_id = $null; codex_has_session = $false; codex_last_log = $null; codex_session_id = $null; codex_console_offset = 0; codex_cwd = $null }
+  $obj = [ordered]@{ last_job_id = $null; codex_has_session = $false; codex_last_log = $null; codex_session_id = $null; codex_console_offset = 0; codex_cwd = $null; codex_model = $null }
   return $obj
 }
 
@@ -406,6 +415,10 @@ function Invoke-CodexExec {
   } else {
     $codexArgs += @('-a', 'never', '--sandbox', 'danger-full-access')
   }
+  $model = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
+  elseif ($cfg.CodexModel) { $model = $cfg.CodexModel }
+  if ($model) { $codexArgs += @('-m', $model) }
   $codexArgs += @('--no-alt-screen', 'exec', '--json', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
   if ($Resume -and $sessionId) { $codexArgs += @('resume', $sessionId) }
   $codexArgs += '-'  # read prompt from stdin
@@ -619,7 +632,10 @@ while ($true) {
 
     switch ($req.op) {
       'ping' {
-        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions) } }
+        $activeModel = $null
+        if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $activeModel = $state.codex_model }
+        elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
+        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel } }
       }
       'run' {
         if (-not $req.cmd) { throw 'cmd missing.' }
@@ -686,6 +702,30 @@ while ($true) {
       }
       'codex.session' {
         $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
+      }
+      'codex.model.get' {
+        $activeModel = $null
+        if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $activeModel = $state.codex_model }
+        elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
+        $resp = @{ ok = $true; result = @{ model = $activeModel; state_model = $state.codex_model; config_model = $cfg.CodexModel } }
+      }
+      'codex.model' {
+        $m = ''
+        if ($req.model) { $m = [string]$req.model }
+        $m = $m.Trim()
+        if (-not $m) { $state.codex_model = $null } else { $state.codex_model = $m }
+
+        $doReset = $false
+        if ($req.reset -ne $null) {
+          $doReset = ([string]$req.reset -match '^(1|true|yes)$')
+        }
+        if ($doReset) {
+          $state.codex_session_id = $null
+          $state.codex_has_session = $false
+        }
+
+        Save-State -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ model = $state.codex_model; reset = $doReset } }
       }
       'codex.use' {
         if (-not $req.session) { throw 'session missing.' }
