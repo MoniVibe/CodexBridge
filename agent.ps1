@@ -34,7 +34,7 @@ function Get-Config {
     ListenPort = 8765
     Secret = ''
     DefaultCwd = 'C:\\dev\\tri'
-    CodexCwd = 'C:\\dev\\tri\\godgame'
+    CodexCwd = 'C:\\dev\\tri'
     AllowPrefixes = @('git','pwsh','python','dotnet','cmd','C:\\dev\\tri')
     TailLines = 80
     LogDir = (Join-Path $PSScriptRoot 'logs')

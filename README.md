@@ -53,6 +53,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 
 ## Notes
 - Headless exec mode is default (`CODEX_MODE=exec`) and does not require a window.
+  - Set `CODEX_CWD` to your preferred non‑repo directory (default is `C:\dev\tri`).
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
