@@ -540,9 +540,9 @@ function Get-CodexJobInfo {
   if ($state.PSObject.Properties.Name -contains 'codex_job_id') { $jobId = $state.codex_job_id }
   if (-not $jobId) { return $null }
 
-  $pid = $null
-  if ($state.PSObject.Properties.Name -contains 'codex_job_pid') { $pid = $state.codex_job_pid }
-  $running = Test-ProcessRunning -Pid $pid
+  $procId = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_pid') { $procId = $state.codex_job_pid }
+  $running = Test-ProcessRunning -Pid $procId
 
   $exitCode = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_exit' -and $state.codex_job_exit -and (Test-Path -LiteralPath $state.codex_job_exit)) {
@@ -557,7 +557,7 @@ function Get-CodexJobInfo {
 
   return [ordered]@{
     id = $jobId
-    pid = $pid
+    pid = $procId
     running = $running
     started = $state.codex_job_started
     exit_code = $exitCode
