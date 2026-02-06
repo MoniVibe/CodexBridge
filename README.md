@@ -84,7 +84,7 @@ Use `{input}` as a placeholder for the downloaded audio file path.
 
 Example (whisper.cpp):
 ```
-STT_CMD=whisper.exe -m C:\models\ggml-base.en.bin -f {input} -otxt -of C:\dev\tri\ops\telebot\logs\stt
+STT_CMD=whisper.exe -m C:\models\ggml-base.en.bin -f {input} -otxt -of C:\dev\unity_clean\CodexBridge\logs\stt
 ```
 
 Optional:
@@ -103,11 +103,11 @@ AGENT_SECRET=your_shared_secret
 ```
 
 Save it at:
-`C:\dev\tri\ops\telebot\secret.env`
+`C:\dev\unity_clean\CodexBridge\secret.env`
 
 2) Run the updater:
 ```powershell
-pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1
+pwsh -NoProfile -File C:\dev\unity_clean\CodexBridge\update_and_start.ps1
 ```
 
 You can also set `CODEXBRIDGE_AGENT_SECRET` or `TELEBOT_AGENT_SECRET` env vars instead of a file.
@@ -123,3 +123,4 @@ pwsh -NoProfile -File .\update_and_start.ps1 -Role both
 On laptops, broker autostart is disabled by default. Override with:
 - `set TELEBOT_AUTOSTART=1` then run the script, or
 - `pwsh -NoProfile -File .\update_and_start.ps1 -Force`
+

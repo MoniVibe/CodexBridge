@@ -1,8 +1,8 @@
 # Codex console launcher
 param(
   [string]$Title = 'CODEX_BRIDGE',
-  [string]$Transcript = "C:\dev\tri\ops\telebot\logs\codex_console.log",
-  [string]$WorkingDir = "C:\dev\tri",
+  [string]$Transcript = "C:\dev\unity_clean\CodexBridge\logs\codex_console.log",
+  [string]$WorkingDir = "C:\dev\unity_clean",
   [string]$ApprovalPolicy = 'never',
   [string]$Sandbox = 'danger-full-access',
   [string]$Model = ''
@@ -20,4 +20,5 @@ try {
 } finally {
   Stop-Transcript | Out-Null
 }
+
 

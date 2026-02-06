@@ -61,9 +61,9 @@ function Get-Config {
     ListenAddr = '0.0.0.0'
     ListenPort = 8765
     Secret = ''
-    DefaultCwd = 'C:\\dev\\tri'
-    CodexCwd = 'C:\\dev\\tri'
-    AllowPrefixes = @('git','pwsh','python','dotnet','cmd','C:\\dev\\tri')
+    DefaultCwd = 'C:\\dev\\unity_clean'
+    CodexCwd = 'C:\\dev\\unity_clean'
+    AllowPrefixes = @('git','pwsh','python','dotnet','cmd','C:\\dev\\unity_clean')
     TailLines = 80
     LogDir = (Join-Path $PSScriptRoot 'logs')
     StateFile = (Join-Path $PSScriptRoot 'agent_state.json')
@@ -1126,3 +1126,4 @@ while ($true) {
   }
   try { $client.Close() } catch {}
 }
+
