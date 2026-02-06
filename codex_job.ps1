@@ -7,6 +7,7 @@ param(
   [Parameter(Mandatory = $true)] [string] $ExitPath,
   [string] $ResumeThreadId = '',
   [string] $Model = '',
+  [string] $ReasoningEffort = '',
   [string] $WorkingDir = '',
   [int] $TimeoutSec = 7200,
   [switch] $Dangerous
@@ -79,6 +80,7 @@ try {
     $args += @('-a', 'never', '--sandbox', 'danger-full-access')
   }
   if ($Model) { $args += @('-m', $Model) }
+  if ($ReasoningEffort) { $args += @('-c', "model_reasoning_effort=$ReasoningEffort") }
   $args += @('--no-alt-screen', 'exec', '--json', '--output-last-message', $OutFile, '--color', 'never', '--skip-git-repo-check')
   if ($ResumeThreadId) { $args += @('resume', $ResumeThreadId) }
   $args += '-'  # read prompt from stdin
@@ -155,6 +157,7 @@ $result = [ordered]@{
   started = $started
   ended = $ended
   model = $Model
+  reasoning_effort = $ReasoningEffort
   resume_thread_id = $ResumeThreadId
   dangerous = [bool]$Dangerous
   working_dir = $WorkingDir

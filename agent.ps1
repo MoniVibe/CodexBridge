@@ -25,6 +25,34 @@ function Import-DotEnv {
   }
 }
 
+function Try-Read-CodexUserConfig {
+  param([string]$Path)
+  $model = ''
+  $reasoning = ''
+  if (-not $Path) { return @{ model = $model; reasoning = $reasoning } }
+  if (-not (Test-Path -LiteralPath $Path)) { return @{ model = $model; reasoning = $reasoning } }
+  try {
+    $text = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+  } catch {
+    return @{ model = $model; reasoning = $reasoning }
+  }
+  foreach ($line in ($text -split "`r?`n")) {
+    $trim = $line.Trim()
+    if (-not $trim) { continue }
+    if ($trim.StartsWith('#')) { continue }
+
+    if (-not $model -and $trim -match '^model\s*=\s*["'']([^"'']+)["'']') {
+      $model = $Matches[1]
+      continue
+    }
+    if (-not $reasoning -and $trim -match '^model_reasoning_effort\s*=\s*["'']([^"'']+)["'']') {
+      $reasoning = $Matches[1]
+      continue
+    }
+  }
+  return @{ model = $model; reasoning = $reasoning }
+}
+
 function Get-Config {
   param([string]$ConfigPath)
 
@@ -53,6 +81,10 @@ function Get-Config {
     ClientTimeoutSec = 300
     CodexDangerous = $true
     CodexModel = ''
+    CodexReasoningEffort = ''
+    CodexUserConfigPath = ''
+    CodexUserConfigModel = ''
+    CodexUserConfigReasoningEffort = ''
     CodexAsync = $true
     CodexJobTailLines = 60
     CodexAutoInit = $false
@@ -85,6 +117,7 @@ function Get-Config {
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
   if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
+  if ($env:CODEX_REASONING_EFFORT) { $cfg.CodexReasoningEffort = $env:CODEX_REASONING_EFFORT }
   if ($env:CODEX_ASYNC) { $cfg.CodexAsync = ($env:CODEX_ASYNC -match '^(1|true|yes)$') }
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
@@ -106,6 +139,13 @@ function Get-Config {
   if (-not (Test-Path -LiteralPath $cfg.CodexCwd)) { $cfg.CodexCwd = $cfg.DefaultCwd }
   if ($cfg.CodexCwd -and ($cfg.CodexBaseCmd -notmatch '\s(-C|--cd)\s')) {
     $cfg.CodexBaseCmd = "$($cfg.CodexBaseCmd) -C $($cfg.CodexCwd)"
+  }
+
+  $cfg.CodexUserConfigPath = Join-Path $env:USERPROFILE '.codex\\config.toml'
+  $userCfg = Try-Read-CodexUserConfig -Path $cfg.CodexUserConfigPath
+  if ($userCfg) {
+    if ($userCfg.model) { $cfg.CodexUserConfigModel = [string]$userCfg.model }
+    if ($userCfg.reasoning) { $cfg.CodexUserConfigReasoningEffort = [string]$userCfg.reasoning }
   }
 
   return $cfg
@@ -288,13 +328,21 @@ function Append-SessionInfo {
   $model = $null
   if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
   elseif ($cfg.CodexModel) { $model = $cfg.CodexModel }
+  elseif ($cfg.CodexUserConfigModel) { $model = $cfg.CodexUserConfigModel }
   if (-not $model) { $model = 'default' }
+
+  $reasoning = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $reasoning = $state.codex_reasoning_effort }
+  elseif ($cfg.CodexReasoningEffort) { $reasoning = $cfg.CodexReasoningEffort }
+  elseif ($cfg.CodexUserConfigReasoningEffort) { $reasoning = $cfg.CodexUserConfigReasoningEffort }
+  if (-not $reasoning) { $reasoning = 'default' }
+
   $cwd = $null
   if ($state.PSObject.Properties.Name -contains 'codex_cwd') { $cwd = $state.codex_cwd }
   if (-not $cwd) { $cwd = $cfg.CodexCwd }
   if (-not $cwd) { $cwd = $cfg.DefaultCwd }
   $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
-  $suffix = "[telebot] codex_session_id: $sid | model: $model | perms: $perms | cwd: $cwd"
+  $suffix = "[telebot] codex_session_id: $sid | model: $model | reasoning: $reasoning | perms: $perms | cwd: $cwd"
   if (-not $Text) { return $suffix }
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
@@ -318,6 +366,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_pid' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_prompt' -Value $null
@@ -339,6 +388,7 @@ function Load-State {
     codex_console_offset = 0
     codex_cwd = $null
     codex_model = $null
+    codex_reasoning_effort = $null
     codex_job_id = $null
     codex_job_pid = $null
     codex_job_prompt = $null
@@ -451,7 +501,13 @@ function Invoke-CodexExec {
   $model = $null
   if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
   elseif ($cfg.CodexModel) { $model = $cfg.CodexModel }
+  elseif ($cfg.CodexUserConfigModel) { $model = $cfg.CodexUserConfigModel }
   if ($model) { $codexArgs += @('-m', $model) }
+  $reasoning = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $reasoning = $state.codex_reasoning_effort }
+  elseif ($cfg.CodexReasoningEffort) { $reasoning = $cfg.CodexReasoningEffort }
+  elseif ($cfg.CodexUserConfigReasoningEffort) { $reasoning = $cfg.CodexUserConfigReasoningEffort }
+  if ($reasoning) { $codexArgs += @('-c', "model_reasoning_effort=$reasoning") }
   $codexArgs += @('--no-alt-screen', 'exec', '--json', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
   if ($Resume -and $sessionId) { $codexArgs += @('resume', $sessionId) }
   $codexArgs += '-'  # read prompt from stdin
@@ -519,6 +575,15 @@ function Get-ActiveCodexModel {
   param($cfg, $state)
   if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { return $state.codex_model }
   if ($cfg.CodexModel) { return $cfg.CodexModel }
+  if ($cfg.CodexUserConfigModel) { return $cfg.CodexUserConfigModel }
+  return ''
+}
+
+function Get-ActiveCodexReasoningEffort {
+  param($cfg, $state)
+  if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { return $state.codex_reasoning_effort }
+  if ($cfg.CodexReasoningEffort) { return $cfg.CodexReasoningEffort }
+  if ($cfg.CodexUserConfigReasoningEffort) { return $cfg.CodexUserConfigReasoningEffort }
   return ''
 }
 
@@ -625,6 +690,7 @@ function Start-CodexExecJob {
   Set-Content -LiteralPath $promptPath -Value $Prompt
 
   $model = Get-ActiveCodexModel -cfg $cfg -state $state
+  $reasoning = Get-ActiveCodexReasoningEffort -cfg $cfg -state $state
 
   $workDir = $cfg.DefaultCwd
   if ($cfg.CodexCwd -and (Test-Path -LiteralPath $cfg.CodexCwd)) { $workDir = $cfg.CodexCwd }
@@ -646,6 +712,7 @@ function Start-CodexExecJob {
   )
   if ($resumeThread) { $argList += @('-ResumeThreadId', $resumeThread) }
   if ($model) { $argList += @('-Model', $model) }
+  if ($reasoning) { $argList += @('-ReasoningEffort', $reasoning) }
   if ($cfg.CodexDangerous) { $argList += '-Dangerous' }
 
   $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $argList -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
@@ -663,8 +730,9 @@ function Start-CodexExecJob {
   Save-State -cfg $cfg -state $state
 
   $modelLabel = if ($model) { $model } else { 'default' }
+  $reasoningLabel = if ($reasoning) { $reasoning } else { 'default' }
   $resumeLabel = if ($resumeThread) { "resume $resumeThread" } else { 'new thread' }
-  $msg = "Queued codex job $jobId ($resumeLabel, model=$modelLabel). Use 'codexlast' to check output."
+  $msg = "Queued codex job $jobId ($resumeLabel, model=$modelLabel, reasoning=$reasoningLabel). Use 'codexlast' to check output."
 
   return @{ output = $msg; job_id = $jobId; pid = $proc.Id }
 }
