@@ -377,18 +377,47 @@ function Invoke-CodexExec {
   $codexPath = (Get-Command codex -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
   if (-not $codexPath) { throw 'codex not found in PATH.' }
 
-  $argList = @('-NoProfile', '-File', $codexPath)
+  $codexArgs = @()
   if ($cfg.CodexDangerous) {
-    $argList += '--dangerously-bypass-approvals-and-sandbox'
+    $codexArgs += '--dangerously-bypass-approvals-and-sandbox'
   } else {
-    $argList += @('-a', 'never', '--sandbox', 'danger-full-access')
+    $codexArgs += @('-a', 'never', '--sandbox', 'danger-full-access')
   }
-  $argList += @('--no-alt-screen', 'exec', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
-  if ($Resume -and $sessionId) { $argList += @('resume', $sessionId) }
-  $argList += $Prompt
+  $codexArgs += @('--no-alt-screen', 'exec', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
+  if ($Resume -and $sessionId) { $codexArgs += @('resume', $sessionId) }
+  $codexArgs += '-'  # read prompt from stdin
 
-  $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $argList -WorkingDirectory $cfg.DefaultCwd `
-    -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+  $argString = '-NoProfile -File ' + (Quote-CmdArg -Arg $codexPath) + ' ' + (($codexArgs | ForEach-Object { Quote-CmdArg -Arg $_ }) -join ' ')
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $cfg.PwshPath
+  $psi.Arguments = $argString
+  $psi.WorkingDirectory = $cfg.DefaultCwd
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  $null = $proc.Start()
+
+  $outAction = {
+    param($sender, $eventArgs)
+    if ($eventArgs.Data) { Add-Content -LiteralPath $using:stdoutPath -Value $eventArgs.Data }
+  }
+  $errAction = {
+    param($sender, $eventArgs)
+    if ($eventArgs.Data) { Add-Content -LiteralPath $using:stderrPath -Value $eventArgs.Data }
+  }
+  Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outAction | Out-Null
+  Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errAction | Out-Null
+  $proc.BeginOutputReadLine()
+  $proc.BeginErrorReadLine()
+
+  $proc.StandardInput.Write($Prompt)
+  $proc.StandardInput.Close()
   $exited = $proc.WaitForExit($cfg.CodexTimeoutSec * 1000)
   if (-not $exited) {
     try { $proc.Kill() } catch {}
