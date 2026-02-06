@@ -51,6 +51,8 @@ function Get-Config {
     CodexSendKey = 'enter'
     ClientTimeoutSec = 300
     CodexDangerous = $false
+    CodexAutoInit = $false
+    CodexInitPrompt = 'Initialize session. Reply "ready".'
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -77,6 +79,8 @@ function Get-Config {
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
+  if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
+  if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
 
   if (-not (Test-Path -LiteralPath $cfg.RunnerPath)) {
     throw "runner.ps1 missing at $($cfg.RunnerPath)"
@@ -383,7 +387,7 @@ function Invoke-CodexExec {
   } else {
     $codexArgs += @('-a', 'never', '--sandbox', 'danger-full-access')
   }
-  $codexArgs += @('--no-alt-screen', 'exec', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
+  $codexArgs += @('--no-alt-screen', 'exec', '--json', '--output-last-message', $outFile, '--color', 'never', '--skip-git-repo-check')
   if ($Resume -and $sessionId) { $codexArgs += @('resume', $sessionId) }
   $codexArgs += '-'  # read prompt from stdin
 
@@ -403,19 +407,8 @@ function Invoke-CodexExec {
   $proc.StartInfo = $psi
   $null = $proc.Start()
 
-  $outAction = {
-    param($sender, $eventArgs)
-    if ($eventArgs.Data) { Add-Content -LiteralPath $using:stdoutPath -Value $eventArgs.Data }
-  }
-  $errAction = {
-    param($sender, $eventArgs)
-    if ($eventArgs.Data) { Add-Content -LiteralPath $using:stderrPath -Value $eventArgs.Data }
-  }
-  Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outAction | Out-Null
-  Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errAction | Out-Null
-  $proc.BeginOutputReadLine()
-  $proc.BeginErrorReadLine()
-
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
   $proc.StandardInput.Write($Prompt)
   $proc.StandardInput.Close()
   $exited = $proc.WaitForExit($cfg.CodexTimeoutSec * 1000)
@@ -423,6 +416,12 @@ function Invoke-CodexExec {
     try { $proc.Kill() } catch {}
     throw "codex exec timed out after $($cfg.CodexTimeoutSec)s"
   }
+  $null = $proc.WaitForExit()
+  $null = [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 5000)
+  $stdoutText = $outTask.Result
+  $stderrText = $errTask.Result
+  if ($stdoutText) { Set-Content -LiteralPath $stdoutPath -Value $stdoutText }
+  if ($stderrText) { Set-Content -LiteralPath $stderrPath -Value $stderrText }
 
   if (-not (Test-Path -LiteralPath $outFile)) {
     $output = "Error: codex did not write output file."
@@ -433,12 +432,16 @@ function Invoke-CodexExec {
   if (-not $output) { $output = '(no output)' }
   Set-Content -LiteralPath $logPath -Value $output
 
+  $sessionText = ''
   if (Test-Path -LiteralPath $stdoutPath) {
-    $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
-    if ($stdout -match 'session id:\s*([0-9a-f-]{16,})') {
-      $state.codex_session_id = $Matches[1]
-      $state.codex_has_session = $true
-    }
+    $sessionText += (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+  }
+  if (Test-Path -LiteralPath $stderrPath) {
+    $sessionText += (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+  }
+  if ($sessionText -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
+    $state.codex_session_id = $Matches[1]
+    $state.codex_has_session = $true
   }
   $state.codex_last_log = $logPath
   Save-State -cfg $cfg -state $state
@@ -563,6 +566,14 @@ function List-CodexSessions {
 $cfg = Get-Config -ConfigPath $ConfigPath
 $state = Load-State -cfg $cfg
 
+if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_session_id) {
+  try {
+    $null = Invoke-CodexExec -cfg $cfg -state $state -Prompt $cfg.CodexInitPrompt -Resume:$false
+  } catch {
+    try { Add-Content -LiteralPath (Join-Path $cfg.LogDir 'agent_init.log') -Value ("init failed: " + $_.Exception.Message) } catch {}
+  }
+}
+
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse($cfg.ListenAddr), $cfg.ListenPort)
 $listener.Start()
 
@@ -628,7 +639,8 @@ while ($true) {
           $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
           $resp = @{ ok = $true; result = @{ output = $outText } }
         } else {
-          $resume = $state.codex_has_session -eq $true
+          $resume = $false
+          if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $resume = $true }
           $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
           $resp = @{ ok = $true; result = $out }
         }
