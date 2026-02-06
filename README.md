@@ -56,7 +56,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
- - If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id to every response.
+- If `CODEX_APPEND_SESSION=1`, the agent appends the real Codex thread id, perms, and cwd to every response.
 
 ## Update + restart (optional)
 If you want a one‑shot updater that pulls latest, reapplies secrets, and restarts:

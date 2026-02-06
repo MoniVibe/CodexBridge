@@ -50,7 +50,7 @@ function Get-Config {
     CodexStartWaitSec = 8
     CodexSendKey = 'enter'
     ClientTimeoutSec = 300
-    CodexDangerous = $false
+    CodexDangerous = $true
     CodexAutoInit = $false
     CodexInitPrompt = 'Initialize session. Reply "ready".'
     CodexAppendSession = $true
@@ -274,7 +274,12 @@ function Append-SessionInfo {
   $sid = $null
   if ($state.PSObject.Properties.Name -contains 'codex_session_id') { $sid = $state.codex_session_id }
   if (-not $sid) { return $Text }
-  $suffix = "[telebot] codex_session_id: $sid"
+  $cwd = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_cwd') { $cwd = $state.codex_cwd }
+  if (-not $cwd) { $cwd = $cfg.CodexCwd }
+  if (-not $cwd) { $cwd = $cfg.DefaultCwd }
+  $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
+  $suffix = "[telebot] codex_session_id: $sid | perms: $perms | cwd: $cwd"
   if (-not $Text) { return $suffix }
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
@@ -296,11 +301,12 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_last_log' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_session_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
+      Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       if (-not $obj.codex_session_id) { $obj.codex_has_session = $false }
       return $obj
     } catch {}
   }
-  $obj = [ordered]@{ last_job_id = $null; codex_has_session = $false; codex_last_log = $null; codex_session_id = $null; codex_console_offset = 0 }
+  $obj = [ordered]@{ last_job_id = $null; codex_has_session = $false; codex_last_log = $null; codex_session_id = $null; codex_console_offset = 0; codex_cwd = $null }
   return $obj
 }
 
@@ -406,10 +412,13 @@ function Invoke-CodexExec {
 
   $argString = '-NoProfile -File ' + (Quote-CmdArg -Arg $codexPath) + ' ' + (($codexArgs | ForEach-Object { Quote-CmdArg -Arg $_ }) -join ' ')
 
+  $workDir = $cfg.DefaultCwd
+  if ($cfg.CodexCwd -and (Test-Path -LiteralPath $cfg.CodexCwd)) { $workDir = $cfg.CodexCwd }
+
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cfg.PwshPath
   $psi.Arguments = $argString
-  $psi.WorkingDirectory = $cfg.DefaultCwd
+  $psi.WorkingDirectory = $workDir
   $psi.RedirectStandardInput = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
@@ -451,6 +460,7 @@ function Invoke-CodexExec {
     $state.codex_session_id = $Matches[1]
     $state.codex_has_session = $true
   }
+  $state.codex_cwd = $workDir
   $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
   Set-Content -LiteralPath $logPath -Value $output
   $state.codex_last_log = $logPath
