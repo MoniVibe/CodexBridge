@@ -27,6 +27,7 @@ Optional: you can still run a single broker that controls multiple agents by add
 ## Telegram Commands
 Use `<target>` as `pc` or `lap` (from `TARGET_*` in `broker.env`).
 
+- Default: if the message does not start with a known command/target, it is treated as a Codex prompt.
 - `<target> codex <prompt>` — send prompt to the active Codex session
 - Convenience: `<target> codex status|job|cancel|last|session` are treated as control commands (not prompts)
 - `<target> codexlast [lines]` — tail the Codex output

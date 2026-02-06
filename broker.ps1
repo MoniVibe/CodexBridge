@@ -461,7 +461,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -646,7 +646,25 @@ function Handle-Command {
       return
     }
     default {
-      Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Unknown command. Send help for usage.'
+      # Vanilla mode: if this isn't a known command, treat the message as a Codex prompt.
+      $promptText = $raw
+      if ($cfg.Targets.ContainsKey($token1Lower) -and $rest1) {
+        # Preserve original casing/punctuation by using the original "rest after target" rather than normalized tokens.
+        $promptText = $rest1
+      }
+      if (-not (Trim-WhitespaceLike -Text $promptText)) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Unknown command. Send help for usage.'
+        return
+      }
+
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $promptText; session = 'default'; auto_start = $true }
+      if ($resp.ok) {
+        $out = $resp.result.output
+        if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+      } else {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      }
       return
     }
   }
@@ -672,10 +690,25 @@ while ($true) {
 
       try {
         if ($msg.text) {
-          $lines = $msg.text -split "`r?`n"
-          foreach ($line in $lines) {
-            if (-not (Trim-WhitespaceLike -Text $line)) { continue }
-            Handle-Command -cfg $cfg -ChatId $chatId -Text $line
+          $full = [string]$msg.text
+          $trim = Trim-WhitespaceLike -Text $full
+          if (-not $trim) { continue }
+
+          # Preserve multi-line prompts unless the message clearly starts with a known command/target.
+          $hasNewline = ($full -match "`r`n|`n")
+          $split = Split-FirstToken -Text $trim
+          $firstTok = (Normalize-Token -Token $split.token).ToLowerInvariant()
+          $shouldSplit = $false
+          if ($hasNewline -and (Is-KnownCommandOrTarget -cfg $cfg -Text $trim -or $trim.StartsWith('/'))) { $shouldSplit = $true }
+
+          if ($shouldSplit) {
+            $lines = $full -split "`r?`n"
+            foreach ($line in $lines) {
+              if (-not (Trim-WhitespaceLike -Text $line)) { continue }
+              Handle-Command -cfg $cfg -ChatId $chatId -Text $line
+            }
+          } else {
+            Handle-Command -cfg $cfg -ChatId $chatId -Text $full
           }
         } elseif ($msg.voice -or $msg.audio) {
           Handle-VoiceMessage -cfg $cfg -ChatId $chatId -Msg $msg
