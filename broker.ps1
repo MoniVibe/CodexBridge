@@ -7,6 +7,9 @@ $ErrorActionPreference = 'Stop'
 
 try { $Host.UI.RawUI.WindowTitle = 'TelebotBroker' } catch {}
 
+$script:BrokerMutex = $null
+$script:LastWebhookClear = Get-Date '1900-01-01'
+
 function Import-DotEnv {
   param([string]$Path)
   if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -94,6 +97,25 @@ function Send-TgMessage {
   }
 }
 
+function Clear-TgWebhook {
+  param($cfg, [string]$Reason = 'startup')
+  $uri = "https://api.telegram.org/bot$($cfg.BotToken)/deleteWebhook"
+  try {
+    Invoke-RestMethod -Method Post -Uri $uri | Out-Null
+    Write-BotLog -Path $cfg.BotLog -Message "deleteWebhook ok ($Reason)"
+  } catch {
+    Write-BotLog -Path $cfg.BotLog -Message "deleteWebhook failed ($Reason): $($_.Exception.Message)"
+  }
+}
+
+function Maybe-ClearWebhook {
+  param($cfg, [string]$Reason)
+  $now = Get-Date
+  if (($now - $script:LastWebhookClear).TotalSeconds -lt 30) { return }
+  $script:LastWebhookClear = $now
+  Clear-TgWebhook -cfg $cfg -Reason $Reason
+}
+
 function Send-ChunkedText {
   param($cfg, [string]$ChatId, [string]$Text)
   $max = $cfg.MaxMessageChars
@@ -171,6 +193,9 @@ function Get-TgUpdates {
   $body = @{ timeout = $cfg.PollTimeoutSec; offset = $Offset }
   try { return Invoke-RestMethod -Method Post -Uri $uri -Body $body } catch {
     Write-BotLog -Path $cfg.BotLog -Message "getUpdates failed: $($_.Exception.Message)"
+    if ($_.Exception.Message -match '\b409\b') {
+      Maybe-ClearWebhook -cfg $cfg -Reason '409 conflict'
+    }
     return @{ ok = $false; result = @() }
   }
 }
@@ -263,6 +288,30 @@ function Normalize-Token {
   if (-not $t) { return '' }
   $t = $t -replace '[\.\,\:\;\!\?\)\]\}\>\"'']+$',''
   return $t
+}
+
+function Acquire-BrokerMutex {
+  param([string]$Name)
+  try {
+    $created = $false
+    $mutex = New-Object System.Threading.Mutex($true, $Name, [ref]$created)
+    if (-not $created) { return $null }
+    return $mutex
+  } catch {
+    return $null
+  }
+}
+
+function Ensure-SingleBroker {
+  param($cfg)
+  $mutex = Acquire-BrokerMutex -Name 'Global\CodexBridgeBroker'
+  if (-not $mutex) { $mutex = Acquire-BrokerMutex -Name 'Local\CodexBridgeBroker' }
+  if (-not $mutex) {
+    Write-BotLog -Path $cfg.BotLog -Message 'Broker already running. Exiting.'
+    Write-Host 'Broker already running. Exiting.'
+    exit 1
+  }
+  $script:BrokerMutex = $mutex
 }
 
 function Is-KnownCommandOrTarget {
@@ -482,6 +531,9 @@ function Handle-Command {
 $cfg = Get-Config -ConfigPath $ConfigPath
 Write-BotLog -Path $cfg.BotLog -Message 'Broker started.'
 
+Ensure-SingleBroker -cfg $cfg
+Clear-TgWebhook -cfg $cfg -Reason 'startup'
+
 $offset = 0
 
 while ($true) {
@@ -497,7 +549,11 @@ while ($true) {
 
       try {
         if ($msg.text) {
-          Handle-Command -cfg $cfg -ChatId $chatId -Text $msg.text
+          $lines = $msg.text -split "`r?`n"
+          foreach ($line in $lines) {
+            if (-not (Trim-WhitespaceLike -Text $line)) { continue }
+            Handle-Command -cfg $cfg -ChatId $chatId -Text $line
+          }
         } elseif ($msg.voice -or $msg.audio) {
           Handle-VoiceMessage -cfg $cfg -ChatId $chatId -Msg $msg
         }
