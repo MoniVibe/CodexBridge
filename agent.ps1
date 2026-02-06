@@ -523,10 +523,10 @@ function Get-ActiveCodexModel {
 }
 
 function Test-ProcessRunning {
-  param([object]$Pid)
-  if (-not $Pid) { return $false }
+  param([object]$ProcessId)
+  if (-not $ProcessId) { return $false }
   try {
-    $p = Get-Process -Id ([int]$Pid) -ErrorAction SilentlyContinue
+    $p = Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue
     return ($null -ne $p)
   } catch {
     return $false
@@ -542,7 +542,7 @@ function Get-CodexJobInfo {
 
   $procId = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_pid') { $procId = $state.codex_job_pid }
-  $running = Test-ProcessRunning -Pid $procId
+  $running = Test-ProcessRunning -ProcessId $procId
 
   $exitCode = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_exit' -and $state.codex_job_exit -and (Test-Path -LiteralPath $state.codex_job_exit)) {
