@@ -54,6 +54,7 @@ function Restart-ByScriptPath {
   Start-Process -FilePath $pwsh -ArgumentList "-NoProfile -File `"$ScriptPath`""
 }
 
+$legacyBotScript = Join-Path $RepoDir 'bot.ps1'
 $secretFile = Join-Path $RepoDir 'secret.env'
 $agentEnv = Join-Path $RepoDir 'agent.env'
 $brokerEnv = Join-Path $RepoDir 'broker.env'
@@ -80,6 +81,14 @@ if ($secret) {
 $runAgent = $false
 $runBroker = $false
 
+# Always stop any legacy polling bot (it conflicts with broker getUpdates and causes 409s).
+if (Test-Path -LiteralPath $legacyBotScript) {
+  $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$legacyBotScript*" }
+  foreach ($p in $procs) {
+    try { Stop-Process -Id $p.ProcessId -Force } catch {}
+  }
+}
+
 switch ($Role.ToLowerInvariant()) {
   'agent' { $runAgent = $true }
   'broker' { $runBroker = $true }
@@ -98,6 +107,14 @@ switch ($Role.ToLowerInvariant()) {
     if ($hasBrokerCfg -and ($agentName.ToLowerInvariant() -eq 'pc')) {
       $runBroker = $true
     }
+  }
+}
+
+# If this machine should not run the broker, stop any stray broker instance to avoid Telegram 409 conflicts.
+if (-not $runBroker) {
+  $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$brokerScript*" }
+  foreach ($p in $procs) {
+    try { Stop-Process -Id $p.ProcessId -Force } catch {}
   }
 }
 

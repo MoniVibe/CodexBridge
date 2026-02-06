@@ -346,7 +346,7 @@ function Is-KnownCommandOrTarget {
   if (-not $token) { return $false }
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
-    'help','status','run','last','tail','get','codex','codexnew','codexfresh',
+    'help','status','run','last','tail','get','codex','codexnew','codexfresh','agent',
     'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexreset','codexstart','codexstop','codexlist','codexlast',
     'cancel','job','model','session'
   )
@@ -445,6 +445,7 @@ function Handle-Command {
     'job'     = 'codexjob'
     'model'   = 'codexmodel'
     'session' = 'codexsession'
+    'agent'   = 'codex'
   }
   if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
 
@@ -496,6 +497,32 @@ function Handle-Command {
     }
     'codex' {
       if (-not $rest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codex <prompt>'; return }
+
+      # Convenience: treat "codex status/job/cancel/last/session" as control commands, not prompts.
+      $subSplit = Split-FirstToken -Text $rest
+      $subCmd = (Normalize-Token -Token $subSplit.token).ToLowerInvariant()
+      $subRest = Trim-WhitespaceLike -Text $subSplit.rest
+
+      if (-not $subRest) {
+        switch ($subCmd) {
+          'status' { $cmd = 'codexjob'; $rest = ''; break }
+          'job' { $cmd = 'codexjob'; $rest = ''; break }
+          'cancel' { $cmd = 'codexcancel'; $rest = ''; break }
+          'session' { $cmd = 'codexsession'; $rest = ''; break }
+        }
+      }
+
+      if ($subCmd -eq 'last' -and (-not $subRest -or $subRest -match '^[0-9]+$')) {
+        $cmd = 'codexlast'
+        $rest = $subRest
+      }
+
+      if ($cmd -ne 'codex') {
+        # Re-dispatch through the main switch with the rewritten cmd/rest.
+        Handle-Command -cfg $cfg -ChatId $ChatId -Text ("$target $cmd $rest".Trim())
+        return
+      }
+
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $rest; session = 'default'; auto_start = $true }
       if ($resp.ok) {
         $out = $resp.result.output

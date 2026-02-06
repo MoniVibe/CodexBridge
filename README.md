@@ -37,6 +37,7 @@ pwsh -NoProfile -File .\agent.ps1
 Use `<target>` as `pc` or `lap` (from `TARGET_*` in `broker.env`).
 
 - `<target> codex <prompt>` — send prompt to the active Codex session
+- Convenience: `<target> codex status|job|cancel|last|session` are treated as control commands (not prompts)
 - `<target> codexlast [lines]` — tail the Codex output
 - `<target> codexsession` — show stored Codex thread id
 - `<target> codexmodel [model] [reset]` — show or set the Codex model (optional `reset` clears the thread id)
@@ -114,3 +115,6 @@ pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role agent
 pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role broker
 pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role both
 ```
+
+The updater also stops any stray `broker.ps1` instance on machines that are not meant to run the broker (to prevent Telegram 409 conflicts),
+and kills the legacy `bot.ps1` if it is running.
