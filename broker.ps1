@@ -79,6 +79,14 @@ function Get-Config {
   if (-not $cfg.ChatIds -or $cfg.ChatIds.Count -eq 0) { throw 'TG_CHAT_ID missing in broker.env' }
   if ($cfg.Targets.Count -eq 0) { throw 'No targets found. Add TARGET_pc=host:port in broker.env.' }
 
+  # If DEFAULT_TARGET is missing or invalid, fall back to the only/first target (common in "one broker per machine").
+  if (-not $cfg.DefaultTarget) { $cfg.DefaultTarget = '' }
+  $cfg.DefaultTarget = $cfg.DefaultTarget.ToLowerInvariant()
+  if (-not $cfg.Targets.ContainsKey($cfg.DefaultTarget)) {
+    $first = ($cfg.Targets.Keys | Sort-Object | Select-Object -First 1)
+    $cfg.DefaultTarget = $first
+  }
+
   New-Item -ItemType Directory -Force -Path $cfg.VoiceDir | Out-Null
 
   return $cfg

@@ -96,17 +96,11 @@ switch ($Role.ToLowerInvariant()) {
   default {
     $runAgent = $true
 
-    $agentName = Get-EnvValueFromFile -Path $agentEnv -Key 'AGENT_NAME'
-    if (-not $agentName) { $agentName = 'pc' }
-
     $tgToken = Get-EnvValueFromFile -Path $brokerEnv -Key 'TG_BOT_TOKEN'
     $hasBrokerCfg = [bool]($tgToken -and $tgToken.Trim())
 
-    # Avoid accidentally running a second broker (e.g. on the laptop). Auto broker only when this
-    # machine's agent is named "pc" and broker.env is populated.
-    if ($hasBrokerCfg -and ($agentName.ToLowerInvariant() -eq 'pc')) {
-      $runBroker = $true
-    }
+    # With the "one broker per machine" setup: start broker whenever broker.env is populated.
+    if ($hasBrokerCfg) { $runBroker = $true }
   }
 }
 

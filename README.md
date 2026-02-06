@@ -3,35 +3,26 @@
 This setup lets you send prompts from Telegram to **desktop/laptop Codex sessions** and fetch output.
 
 ## Roles
-- **broker.ps1** (desktop): Telegram bot + dispatcher
+- **broker.ps1** (each machine): Telegram bot + dispatcher (recommended: one bot token per machine)
 - **agent.ps1** (each machine): accepts commands and runs Codex in headless exec mode
 - **codex_console.ps1** (optional): launches Codex in a visible console with transcript (fallback mode)
 
-## Desktop Setup (broker + agent)
+## Setup (Per Machine Broker)
 1. Fill `broker.env` and `agent.env`.
+   - Recommended: `TARGET_<name>=127.0.0.1:8765` and `DEFAULT_TARGET=<name>` on each machine.
 2. Start the agent (leave running):
 
 ```powershell
 pwsh -NoProfile -File .\agent.ps1
 ```
 
-3. Start the broker:
+3. Start the broker (leave running):
 
 ```powershell
 pwsh -NoProfile -File .\broker.ps1
 ```
 
-## Laptop Setup (agent only)
-- Copy `agent.ps1` and `runner.ps1` to the laptop (same folder).
-- Edit `agent.env`:
-  - `AGENT_NAME=lap`
-  - `AGENT_SECRET` must match the broker’s `AGENT_SECRET`
-  - `CODEX_MODE=exec` (default) for headless mode
-- Start the agent:
-
-```powershell
-pwsh -NoProfile -File .\agent.ps1
-```
+Optional: you can still run a single broker that controls multiple agents by adding multiple `TARGET_*` entries.
 
 ## Telegram Commands
 Use `<target>` as `pc` or `lap` (from `TARGET_*` in `broker.env`).
@@ -107,8 +98,8 @@ pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1
 
 You can also set `CODEXBRIDGE_AGENT_SECRET` or `TELEBOT_AGENT_SECRET` env vars instead of a file.
 
-By default the updater starts the agent, and only starts the broker on machines whose `AGENT_NAME=pc`
-and `broker.env` has `TG_BOT_TOKEN` set. You can override with:
+By default the updater starts the agent, and starts the broker whenever `broker.env` has `TG_BOT_TOKEN` set
+(one broker per machine). You can override with:
 
 ```
 pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role agent
@@ -116,5 +107,5 @@ pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role broker
 pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role both
 ```
 
-The updater also stops any stray `broker.ps1` instance on machines that are not meant to run the broker (to prevent Telegram 409 conflicts),
+The updater also stops any stray `broker.ps1` instance when it is not supposed to be running (e.g. `-Role agent`, or no `TG_BOT_TOKEN`),
 and kills the legacy `bot.ps1` if it is running.
