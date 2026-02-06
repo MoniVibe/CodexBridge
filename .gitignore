@@ -1,0 +1,10 @@
+*.log
+*.out
+logs/
+telebot_bundle.zip
+agent_state.json
+state.json
+jobs.json
+broker.env
+agent.env
+config.env
