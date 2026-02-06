@@ -44,6 +44,7 @@ function Get-Config {
     PollTimeoutSec = 20
     MaxMessageChars = 3500
     BotLog = (Join-Path $PSScriptRoot 'broker.log')
+    StateFile = (Join-Path $PSScriptRoot 'state.json')
     SttCmd = $null
     SttTimeoutSec = 120
     VoiceDir = (Join-Path $PSScriptRoot 'logs')
@@ -67,6 +68,7 @@ function Get-Config {
   if ($env:STT_CMD) { $cfg.SttCmd = $env:STT_CMD }
   if ($env:STT_TIMEOUT_SEC) { $cfg.SttTimeoutSec = [int]$env:STT_TIMEOUT_SEC }
   if ($env:VOICE_TARGET) { $cfg.VoiceTarget = $env:VOICE_TARGET }
+  if ($env:BROKER_STATE_FILE) { $cfg.StateFile = $env:BROKER_STATE_FILE }
 
   $all = [System.Environment]::GetEnvironmentVariables()
   foreach ($key in $all.Keys) {
@@ -110,6 +112,39 @@ function Write-BotLog {
   param([string]$Path, [string]$Message)
   $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
   try { Add-Content -LiteralPath $Path -Value "[$ts] $Message" } catch {}
+}
+
+function Ensure-StateProperty {
+  param($state, [string]$Name, $Value)
+  if (-not ($state.PSObject.Properties.Name -contains $Name)) {
+    try { $state | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force } catch {}
+  }
+}
+
+function Load-State {
+  param($cfg)
+  if ($cfg.StateFile -and (Test-Path -LiteralPath $cfg.StateFile)) {
+    try {
+      $obj = Get-Content -LiteralPath $cfg.StateFile -Raw | ConvertFrom-Json
+      if ($null -ne $obj) {
+        Ensure-StateProperty -state $obj -Name 'last_update_id' -Value 0
+        Ensure-StateProperty -state $obj -Name 'pending_codex_jobs' -Value @()
+        return $obj
+      }
+    } catch {}
+  }
+  return [pscustomobject]@{ last_update_id = 0; pending_codex_jobs = @() }
+}
+
+function Save-State {
+  param($cfg, $state)
+  if (-not $cfg.StateFile) { return }
+  try {
+    $json = $state | ConvertTo-Json -Depth 8
+    $tmp = $cfg.StateFile + '.tmp'
+    Set-Content -LiteralPath $tmp -Value $json
+    Move-Item -LiteralPath $tmp -Destination $cfg.StateFile -Force
+  } catch {}
 }
 
 function Send-TgMessage {
@@ -386,7 +421,7 @@ function Build-VoiceCommand {
 }
 
 function Handle-VoiceMessage {
-  param($cfg, [string]$ChatId, $Msg)
+  param($cfg, $state, [string]$ChatId, $Msg)
 
   $voice = $Msg.voice
   $audio = $Msg.audio
@@ -412,14 +447,14 @@ function Handle-VoiceMessage {
     $cmdText = Build-VoiceCommand -cfg $cfg -Text $text
     Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Heard: " + $text)
     if ($cmdText) {
-      Handle-Command -cfg $cfg -ChatId $ChatId -Text $cmdText
+      Handle-Command -cfg $cfg -state $state -ChatId $ChatId -Text $cmdText
     }
   } catch {
     Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Voice failed: " + $_.Exception.Message)
   }
 }
 function Handle-Command {
-  param($cfg, [string]$ChatId, [string]$Text)
+  param($cfg, $state, [string]$ChatId, [string]$Text)
 
   $clean = Trim-WhitespaceLike -Text $Text
   if (-not $clean) { return }
@@ -466,6 +501,7 @@ function Handle-Command {
   $aliases = @{
     'cancel'  = 'codexcancel'
     'job'     = 'codexjob'
+    'codexstatus' = 'codexjob'
     'model'   = 'codexmodel'
     'session' = 'codexsession'
     'agent'   = 'codex'
@@ -473,6 +509,23 @@ function Handle-Command {
   if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
 
   Write-BotLog -Path $cfg.BotLog -Message ("parse: target={0} cmd={1} restLen={2}" -f $target, $cmd, ($rest | ForEach-Object { $_.Length }))
+
+  function Add-PendingCodexJob {
+    param([string]$JobId, [string]$Target, [string]$ChatId)
+    if (-not $state) { return }
+    Ensure-StateProperty -state $state -Name 'pending_codex_jobs' -Value @()
+    $existing = @()
+    try { $existing = @($state.pending_codex_jobs) } catch { $existing = @() }
+    $filtered = @($existing | Where-Object { $_ -and $_.job_id -ne $JobId })
+    $filtered += [pscustomobject]@{
+      job_id = $JobId
+      target = $Target
+      chat_id = $ChatId
+      queued_at = (Get-Date).ToString('o')
+    }
+    $state.pending_codex_jobs = $filtered
+    Save-State -cfg $cfg -state $state
+  }
 
   switch ($cmd) {
     'help' {
@@ -542,15 +595,24 @@ function Handle-Command {
 
       if ($cmd -ne 'codex') {
         # Re-dispatch through the main switch with the rewritten cmd/rest.
-        Handle-Command -cfg $cfg -ChatId $ChatId -Text ("$target $cmd $rest".Trim())
+        Handle-Command -cfg $cfg -state $state -ChatId $ChatId -Text ("$target $cmd $rest".Trim())
         return
       }
 
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $rest; session = 'default'; auto_start = $true }
       if ($resp.ok) {
         $out = $resp.result.output
-        if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        $jobId = $null
+        $pid = $null
+        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
+        if ($jobId -and $pid) {
+          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
+        } else {
+          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        }
       } else {
         Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       }
@@ -561,8 +623,17 @@ function Handle-Command {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new'; prompt = $rest }
       if ($resp.ok) {
         $out = $resp.result.output
-        if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
-        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        $jobId = $null
+        $pid = $null
+        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
+        if ($jobId -and $pid) {
+          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
+        } else {
+          if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
+          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        }
       } else {
         Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       }
@@ -573,8 +644,17 @@ function Handle-Command {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new'; prompt = $rest }
       if ($resp.ok) {
         $out = $resp.result.output
-        if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
-        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        $jobId = $null
+        $pid = $null
+        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
+        if ($jobId -and $pid) {
+          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
+        } else {
+          if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
+          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        }
       } else {
         Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       }
@@ -675,8 +755,17 @@ function Handle-Command {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $promptText; session = 'default'; auto_start = $true }
       if ($resp.ok) {
         $out = $resp.result.output
-        if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        $jobId = $null
+        $pid = $null
+        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
+        if ($jobId -and $pid) {
+          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
+        } else {
+          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+        }
       } else {
         Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       }
@@ -685,18 +774,56 @@ function Handle-Command {
   }
 }
 $cfg = Get-Config -ConfigPath $ConfigPath
+$state = Load-State -cfg $cfg
 Write-BotLog -Path $cfg.BotLog -Message 'Broker started.'
 
 Ensure-SingleBroker -cfg $cfg
 Clear-TgWebhook -cfg $cfg -Reason 'startup'
 
 $offset = 0
+try { $offset = [int]$state.last_update_id } catch { $offset = 0 }
 
 while ($true) {
+  # If the agent is running Codex asynchronously, push completed jobs without requiring codexlast.
+  try {
+    Ensure-StateProperty -state $state -Name 'pending_codex_jobs' -Value @()
+    $pending = @()
+    try { $pending = @($state.pending_codex_jobs) } catch { $pending = @() }
+    if ($pending.Count -gt 0) {
+      $remaining = @()
+      foreach ($j in $pending) {
+        if (-not $j) { continue }
+        $jobId = $null
+        $tgt = $cfg.DefaultTarget
+        $cid = $null
+        try { $jobId = [string]$j.job_id } catch {}
+        try { if ($j.target) { $tgt = [string]$j.target } } catch {}
+        try { $cid = [string]$j.chat_id } catch {}
+        if (-not $cid) { continue }
+
+        $jr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload @{ op = 'codex.job' }
+        if (-not $jr.ok) { $remaining += $j; continue }
+        $job = $jr.result.job
+        if (-not $job) { $remaining += $j; continue }
+        if ($jobId -and $job.id -and ($job.id -ne $jobId)) { $remaining += $j; continue }
+        if ($job.running) { $remaining += $j; continue }
+
+        $lr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload @{ op = 'codex.last'; session = 'default' }
+        Send-ChunkedText -cfg $cfg -ChatId $cid -Text (Format-ResultText $lr)
+      }
+      $state.pending_codex_jobs = $remaining
+      Save-State -cfg $cfg -state $state
+    }
+  } catch {
+    Write-BotLog -Path $cfg.BotLog -Message ("pending tick failed: " + $_.Exception.Message)
+  }
+
   $updates = Get-TgUpdates -cfg $cfg -Offset $offset
   if ($updates.ok -and $updates.result) {
     foreach ($update in $updates.result) {
       $offset = [int]$update.update_id + 1
+      try { $state.last_update_id = $offset } catch { Ensure-StateProperty -state $state -Name 'last_update_id' -Value $offset; try { $state.last_update_id = $offset } catch {} }
+      Save-State -cfg $cfg -state $state
       $msg = $update.message
       if (-not $msg) { continue }
       $chatId = [string]$msg.chat.id
@@ -720,13 +847,13 @@ while ($true) {
             $lines = $full -split "`r?`n"
             foreach ($line in $lines) {
               if (-not (Trim-WhitespaceLike -Text $line)) { continue }
-              Handle-Command -cfg $cfg -ChatId $chatId -Text $line
+              Handle-Command -cfg $cfg -state $state -ChatId $chatId -Text $line
             }
           } else {
-            Handle-Command -cfg $cfg -ChatId $chatId -Text $full
+            Handle-Command -cfg $cfg -state $state -ChatId $chatId -Text $full
           }
         } elseif ($msg.voice -or $msg.audio) {
-          Handle-VoiceMessage -cfg $cfg -ChatId $chatId -Msg $msg
+          Handle-VoiceMessage -cfg $cfg -state $state -ChatId $chatId -Msg $msg
         }
       } catch {
         Write-BotLog -Path $cfg.BotLog -Message "Handle-Command failed: $($_.Exception.Message)"

@@ -52,6 +52,9 @@ Default: if the message does not start with a known command/target, it is treate
 
 Convenience: `[<target>] codex status|job|cancel|last|session` are treated as control commands (not prompts).
 
+Async QoL:
+- If `CODEX_ASYNC=1`, the broker immediately acknowledges with a job id and automatically posts the final Codex output when the job completes (no need to poll `codexlast`).
+
 Optional job runner (less used):
 - `[<target>] run <cmd>`
 - `[<target>] last [lines]`

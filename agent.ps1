@@ -1113,6 +1113,10 @@ while ($true) {
     $resp = @{ ok = $false; error = $_.Exception.Message }
   }
 
-  $writer.WriteLine(($resp | ConvertTo-Json -Compress -Depth 8))
-  $client.Close()
+  try {
+    $writer.WriteLine(($resp | ConvertTo-Json -Compress -Depth 8))
+  } catch {
+    # Client may have disconnected while we were processing; keep the agent alive.
+  }
+  try { $client.Close() } catch {}
 }
