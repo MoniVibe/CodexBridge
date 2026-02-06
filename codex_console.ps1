@@ -13,11 +13,11 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Transcript) | Out
 Start-Transcript -Path $Transcript -Append | Out-Null
 
 try {
-  if ($Model) {
-    codex --no-alt-screen -m $Model -a $ApprovalPolicy --sandbox $Sandbox -C $WorkingDir
-  } else {
-    codex --no-alt-screen -a $ApprovalPolicy --sandbox $Sandbox -C $WorkingDir
-  }
+  if (-not $Model -and $env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
+  $args = @('--no-alt-screen', '-a', $ApprovalPolicy, '--sandbox', $Sandbox, '-C', $WorkingDir)
+  if ($Model) { $args = @('-m', $Model) + $args }
+  codex @args
 } finally {
   Stop-Transcript | Out-Null
 }
+

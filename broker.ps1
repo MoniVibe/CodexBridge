@@ -57,7 +57,8 @@ function Get-Config {
     $cfg.ChatIds = $env:TG_CHAT_ID.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
   }
   if ($env:TG_SECRET) { $cfg.Secret = $env:TG_SECRET }
-  if ($env:DEFAULT_TARGET) { $cfg.DefaultTarget = $env:DEFAULT_TARGET }
+  $defaultFromEnv = $false
+  if ($env:DEFAULT_TARGET) { $cfg.DefaultTarget = $env:DEFAULT_TARGET; $defaultFromEnv = $true }
   if ($env:AGENT_SECRET) { $cfg.AgentSecret = $env:AGENT_SECRET }
   if ($env:AGENT_TIMEOUT_SEC) { $cfg.AgentTimeoutSec = [int]$env:AGENT_TIMEOUT_SEC }
   if ($env:AGENT_CONNECT_TIMEOUT_SEC) { $cfg.AgentConnectTimeoutSec = [int]$env:AGENT_CONNECT_TIMEOUT_SEC }
@@ -77,14 +78,28 @@ function Get-Config {
 
   if (-not $cfg.BotToken) { throw 'TG_BOT_TOKEN missing in broker.env' }
   if (-not $cfg.ChatIds -or $cfg.ChatIds.Count -eq 0) { throw 'TG_CHAT_ID missing in broker.env' }
-  if ($cfg.Targets.Count -eq 0) { throw 'No targets found. Add TARGET_pc=host:port in broker.env.' }
 
-  # If DEFAULT_TARGET is missing or invalid, fall back to the only/first target (common in "one broker per machine").
+  # Per-machine default: if no TARGET_* entries are present, dispatch to the local agent.
+  # (You can still configure multiple TARGET_* entries for router mode.)
+  if ($cfg.Targets.Count -eq 0) {
+    $port = 8765
+    try {
+      $agentEnv = Join-Path $PSScriptRoot 'agent.env'
+      if (Test-Path -LiteralPath $agentEnv) {
+        $line = Get-Content -LiteralPath $agentEnv -ErrorAction SilentlyContinue | Where-Object { $_ -match '^LISTEN_PORT\s*=\s*\d+' } | Select-Object -First 1
+        if ($line -match '^LISTEN_PORT\s*=\s*(\d+)') { $port = [int]$Matches[1] }
+      }
+    } catch {}
+    $cfg.Targets['local'] = "127.0.0.1:$port"
+    if (-not $cfg.DefaultTarget) { $cfg.DefaultTarget = 'local' }
+  }
+
+  # Normalize DEFAULT_TARGET: keep lower-case and ensure it exists.
   if (-not $cfg.DefaultTarget) { $cfg.DefaultTarget = '' }
   $cfg.DefaultTarget = $cfg.DefaultTarget.ToLowerInvariant()
   if (-not $cfg.Targets.ContainsKey($cfg.DefaultTarget)) {
-    $first = ($cfg.Targets.Keys | Sort-Object | Select-Object -First 1)
-    $cfg.DefaultTarget = $first
+    if ($cfg.Targets.ContainsKey('local')) { $cfg.DefaultTarget = 'local' }
+    else { $cfg.DefaultTarget = ($cfg.Targets.Keys | Sort-Object | Select-Object -First 1) }
   }
 
   New-Item -ItemType Directory -Force -Path $cfg.VoiceDir | Out-Null
@@ -461,7 +476,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: <target> codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -715,7 +730,7 @@ while ($true) {
         }
       } catch {
         Write-BotLog -Path $cfg.BotLog -Message "Handle-Command failed: $($_.Exception.Message)"
-        Send-TgMessage -cfg $cfg -ChatId $chatId -Text 'Command failed. Check broker.log on PC.'
+        Send-TgMessage -cfg $cfg -ChatId $chatId -Text 'Command failed. Check broker.log.'
       }
     }
   }

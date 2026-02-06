@@ -2,10 +2,21 @@ param(
   [string]$RepoDir = $PSScriptRoot,
   [switch]$SkipPull,
   [ValidateSet('auto','agent','broker','both')]
-  [string]$Role = 'auto'
+  [string]$Role = 'auto',
+  [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Broker autostart guard:
+# - Desktop defaults to on
+# - Laptop defaults to off
+# Override with TELEBOT_AUTOSTART=1 or -Force.
+$autostart = $env:TELEBOT_AUTOSTART
+if (-not $autostart) {
+  if ($env:COMPUTERNAME -ieq 'DESKTOP-9VVJV75') { $autostart = '1' } else { $autostart = '0' }
+}
+$allowBroker = $Force -or ($autostart -match '^(1|true|yes)$')
 
 function Get-Secret {
   param([string]$SecretFile)
@@ -104,6 +115,12 @@ switch ($Role.ToLowerInvariant()) {
   }
 }
 
+# Laptop default: never autostart the broker unless explicitly overridden.
+if ($runBroker -and -not $allowBroker) {
+  Write-Host "update_and_start: broker suppressed (TELEBOT_AUTOSTART=0). Use -Force or set TELEBOT_AUTOSTART=1 to start the broker."
+  $runBroker = $false
+}
+
 # If this machine should not run the broker, stop any stray broker instance to avoid Telegram 409 conflicts.
 if (-not $runBroker) {
   $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$brokerScript*" }
@@ -114,3 +131,4 @@ if (-not $runBroker) {
 
 if ($runBroker) { Restart-ByScriptPath -ScriptPath $brokerScript }
 if ($runAgent) { Restart-ByScriptPath -ScriptPath $agentScript }
+

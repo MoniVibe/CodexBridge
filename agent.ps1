@@ -69,7 +69,7 @@ function Get-Config {
     StateFile = (Join-Path $PSScriptRoot 'agent_state.json')
     RunnerPath = (Join-Path $PSScriptRoot 'runner.ps1')
     CodexJobScript = (Join-Path $PSScriptRoot 'codex_job.ps1')
-    CodexBaseCmd = 'codex -a never --sandbox workspace-write --no-alt-screen --skip-git-repo-check'
+    CodexBaseCmd = 'codex -a never --sandbox danger-full-access --no-alt-screen'
     CodexTimeoutSec = 300
     CodexWaitSec = 15
     CodexWindowTitle = 'CODEX_BRIDGE'
@@ -105,6 +105,7 @@ function Get-Config {
   }
   if ($env:TAIL_LINES) { $cfg.TailLines = [int]$env:TAIL_LINES }
   if ($env:CODEX_BASE_CMD) { $cfg.CodexBaseCmd = $env:CODEX_BASE_CMD }
+  if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
   if ($env:CODEX_TIMEOUT_SEC) { $cfg.CodexTimeoutSec = [int]$env:CODEX_TIMEOUT_SEC }
   if ($env:CODEX_MODE) { $cfg.CodexMode = $env:CODEX_MODE }
   if ($env:CODEX_WINDOW_TITLE) { $cfg.CodexWindowTitle = $env:CODEX_WINDOW_TITLE }
@@ -116,7 +117,6 @@ function Get-Config {
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
-  if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
   if ($env:CODEX_REASONING_EFFORT) { $cfg.CodexReasoningEffort = $env:CODEX_REASONING_EFFORT }
   if ($env:CODEX_ASYNC) { $cfg.CodexAsync = ($env:CODEX_ASYNC -match '^(1|true|yes)$') }
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
@@ -139,6 +139,9 @@ function Get-Config {
   if (-not (Test-Path -LiteralPath $cfg.CodexCwd)) { $cfg.CodexCwd = $cfg.DefaultCwd }
   if ($cfg.CodexCwd -and ($cfg.CodexBaseCmd -notmatch '\s(-C|--cd)\s')) {
     $cfg.CodexBaseCmd = "$($cfg.CodexBaseCmd) -C $($cfg.CodexCwd)"
+  }
+  if ($cfg.CodexModel -and ($cfg.CodexBaseCmd -notmatch '(^|\s)(-m|--model)\s')) {
+    $cfg.CodexBaseCmd = "$($cfg.CodexBaseCmd) -m $($cfg.CodexModel)"
   }
 
   $cfg.CodexUserConfigPath = Join-Path $env:USERPROFILE '.codex\\config.toml'
@@ -241,7 +244,6 @@ function Start-CodexConsole {
     '-Transcript', $cfg.CodexTranscript,
     '-WorkingDir', $cfg.CodexCwd
   )
-
   if ($cfg.CodexModel) { $args += @('-Model', $cfg.CodexModel) }
 
   $null = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd
