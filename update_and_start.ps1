@@ -1,6 +1,8 @@
 param(
   [string]$RepoDir = $PSScriptRoot,
-  [switch]$SkipPull
+  [switch]$SkipPull,
+  [ValidateSet('auto','agent','broker','both')]
+  [string]$Role = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +28,14 @@ function Set-EnvSecret {
   }
   if (-not $found) { $updated += "AGENT_SECRET=$Secret" }
   Set-Content -LiteralPath $Path -Value $updated
+}
+
+function Get-EnvValueFromFile {
+  param([string]$Path, [string]$Key)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  $line = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue | Where-Object { $_ -match ("^" + [regex]::Escape($Key) + "=") } | Select-Object -First 1
+  if (-not $line) { return $null }
+  return ($line -replace ("^" + [regex]::Escape($Key) + "="), '').Trim()
 }
 
 function Restart-ByScriptPath {
@@ -67,5 +77,29 @@ if ($secret) {
   Set-EnvSecret -Path $brokerEnv -Secret $secret
 }
 
-Restart-ByScriptPath -ScriptPath $brokerScript
-Restart-ByScriptPath -ScriptPath $agentScript
+$runAgent = $false
+$runBroker = $false
+
+switch ($Role.ToLowerInvariant()) {
+  'agent' { $runAgent = $true }
+  'broker' { $runBroker = $true }
+  'both' { $runAgent = $true; $runBroker = $true }
+  default {
+    $runAgent = $true
+
+    $agentName = Get-EnvValueFromFile -Path $agentEnv -Key 'AGENT_NAME'
+    if (-not $agentName) { $agentName = 'pc' }
+
+    $tgToken = Get-EnvValueFromFile -Path $brokerEnv -Key 'TG_BOT_TOKEN'
+    $hasBrokerCfg = [bool]($tgToken -and $tgToken.Trim())
+
+    # Avoid accidentally running a second broker (e.g. on the laptop). Auto broker only when this
+    # machine's agent is named "pc" and broker.env is populated.
+    if ($hasBrokerCfg -and ($agentName.ToLowerInvariant() -eq 'pc')) {
+      $runBroker = $true
+    }
+  }
+}
+
+if ($runBroker) { Restart-ByScriptPath -ScriptPath $brokerScript }
+if ($runAgent) { Restart-ByScriptPath -ScriptPath $agentScript }

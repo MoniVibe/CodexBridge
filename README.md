@@ -105,3 +105,12 @@ pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1
 ```
 
 You can also set `CODEXBRIDGE_AGENT_SECRET` or `TELEBOT_AGENT_SECRET` env vars instead of a file.
+
+By default the updater starts the agent, and only starts the broker on machines whose `AGENT_NAME=pc`
+and `broker.env` has `TG_BOT_TOKEN` set. You can override with:
+
+```
+pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role agent
+pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role broker
+pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1 -Role both
+```
