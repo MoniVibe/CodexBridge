@@ -53,6 +53,7 @@ function Get-Config {
     CodexDangerous = $false
     CodexAutoInit = $false
     CodexInitPrompt = 'Initialize session. Reply "ready".'
+    CodexAppendSession = $true
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -81,6 +82,7 @@ function Get-Config {
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
+  if ($env:CODEX_APPEND_SESSION) { $cfg.CodexAppendSession = ($env:CODEX_APPEND_SESSION -match '^(1|true|yes)$') }
 
   if (-not (Test-Path -LiteralPath $cfg.RunnerPath)) {
     throw "runner.ps1 missing at $($cfg.RunnerPath)"
@@ -266,6 +268,17 @@ function Clean-TranscriptText {
   return ($clean -join "`n")
 }
 
+function Append-SessionInfo {
+  param($cfg, $state, [string]$Text)
+  if (-not $cfg.CodexAppendSession) { return $Text }
+  $sid = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_session_id') { $sid = $state.codex_session_id }
+  if (-not $sid) { return $Text }
+  $suffix = "[telebot] codex_session_id: $sid"
+  if (-not $Text) { return $suffix }
+  return ($Text.TrimEnd() + "`n`n" + $suffix)
+}
+
 function Get-LogTail {
   param([string]$LogPath, [int]$Lines)
   if (-not (Test-Path -LiteralPath $LogPath)) { return '(log missing)' }
@@ -430,19 +443,16 @@ function Invoke-CodexExec {
   }
 
   if (-not $output) { $output = '(no output)' }
-  Set-Content -LiteralPath $logPath -Value $output
 
   $sessionText = ''
-  if (Test-Path -LiteralPath $stdoutPath) {
-    $sessionText += (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-  }
-  if (Test-Path -LiteralPath $stderrPath) {
-    $sessionText += (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
-  }
+  if ($stdoutText) { $sessionText += $stdoutText }
+  if ($stderrText) { $sessionText += $stderrText }
   if ($sessionText -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
     $state.codex_session_id = $Matches[1]
     $state.codex_has_session = $true
   }
+  $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
+  Set-Content -LiteralPath $logPath -Value $output
   $state.codex_last_log = $logPath
   Save-State -cfg $cfg -state $state
 
