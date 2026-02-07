@@ -278,7 +278,7 @@ function Stop-CodexConsole {
     $title = $cfg.CodexWindowTitle
     if ($title) {
       $uiProcs = Get-Process | Where-Object {
-        $_.MainWindowTitle -eq $title -and ($_.ProcessName -match '^(pwsh|powershell|windowsterminal|wt)$')
+        $_.MainWindowTitle -eq $title -and ($_.ProcessName -match '^(pwsh|powershell)$')
       }
       foreach ($p in $uiProcs) { $null = $consolePids.Add([int]$p.Id) }
     }
