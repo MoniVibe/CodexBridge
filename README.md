@@ -43,7 +43,7 @@ Target prefix is optional:
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
 - `[<target>] codexjob`: show current Codex job status (async mode)
 - `[<target>] codexcancel` (alias: `cancel`): cancel the running Codex job (async mode)
-- `[<target>] codexuse <thread_id>`: resume a specific thread id
+- `[<target>] codexuse <thread_id>`: resume a specific thread id (alias: `codexresume`)
 - `[<target>] codexreset`: clear stored thread id
 - `[<target>] status`: show agent status
 
