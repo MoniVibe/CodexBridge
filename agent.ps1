@@ -236,7 +236,7 @@ function New-JobId {
 }
 
 function Start-CodexConsole {
-  param($cfg)
+  param($cfg, $state)
   if (-not (Test-Path -LiteralPath $cfg.CodexConsoleScript)) {
     throw "codex_console.ps1 missing at $($cfg.CodexConsoleScript)"
   }
@@ -250,12 +250,25 @@ function Start-CodexConsole {
   )
   if ($cfg.CodexModel) { $args += @('-Model', $cfg.CodexModel) }
 
-  $null = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd
+  $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd -PassThru
+  if ($state -and $proc) {
+    $state.codex_console_pid = $proc.Id
+    Save-State -cfg $cfg -state $state
+  }
+  return $proc.Id
 }
 
 function Stop-CodexConsole {
-  param($cfg)
+  param($cfg, $state)
   $stopped = $false
+  if ($state -and $state.PSObject.Properties.Name -contains 'codex_console_pid' -and $state.codex_console_pid) {
+    try {
+      Stop-Process -Id ([int]$state.codex_console_pid) -Force
+      $stopped = $true
+    } catch {}
+    $state.codex_console_pid = $null
+    try { Save-State -cfg $cfg -state $state } catch {}
+  }
   try {
     $pattern = [regex]::Escape($cfg.CodexConsoleScript)
     $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $pattern }
@@ -273,14 +286,22 @@ function Send-CodexConsolePrompt {
   param($cfg, $state, [string]$Prompt)
 
   Ensure-StateProperty -state $state -Name 'codex_console_offset' -Value 0
+  Ensure-StateProperty -state $state -Name 'codex_console_pid' -Value $null
 
   Add-Type -AssemblyName System.Windows.Forms
   $shell = New-Object -ComObject WScript.Shell
-  $ok = $shell.AppActivate($cfg.CodexWindowTitle)
+  $ok = $false
+  if ($state.codex_console_pid) {
+    try { $ok = $shell.AppActivate([int]$state.codex_console_pid) } catch { $ok = $false }
+  }
+  if (-not $ok) { $ok = $shell.AppActivate($cfg.CodexWindowTitle) }
   if (-not $ok -and $cfg.CodexConsoleAutoStart) {
-    Start-CodexConsole -cfg $cfg
+    $null = Start-CodexConsole -cfg $cfg -state $state
     Start-Sleep -Seconds $cfg.CodexStartWaitSec
-    $ok = $shell.AppActivate($cfg.CodexWindowTitle)
+    if ($state.codex_console_pid) {
+      try { $ok = $shell.AppActivate([int]$state.codex_console_pid) } catch { $ok = $false }
+    }
+    if (-not $ok) { $ok = $shell.AppActivate($cfg.CodexWindowTitle) }
   }
   if (-not $ok) { throw "Codex window not found: $($cfg.CodexWindowTitle)" }
 
@@ -392,6 +413,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_last_log' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_session_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
+      Ensure-StateProperty -state $obj -Name 'codex_console_pid' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
@@ -415,6 +437,7 @@ function Load-State {
     codex_last_log = $null
     codex_session_id = $null
     codex_console_offset = 0
+    codex_console_pid = $null
     codex_cwd = $null
     codex_model = $null
     codex_reasoning_effort = $null
@@ -1028,8 +1051,8 @@ while ($true) {
       'codex.new' {
         $mode = Get-EffectiveCodexMode -cfg $cfg -state $state
         if ($mode -eq 'console') {
-          $null = Stop-CodexConsole -cfg $cfg
-          Start-CodexConsole -cfg $cfg
+          $null = Stop-CodexConsole -cfg $cfg -state $state
+          $null = Start-CodexConsole -cfg $cfg -state $state
           Start-Sleep -Seconds $cfg.CodexStartWaitSec
           if ($cfg.CodexNewDelaySec -gt 0) { Start-Sleep -Seconds $cfg.CodexNewDelaySec }
           $state.codex_console_offset = 0
