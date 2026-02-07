@@ -249,6 +249,22 @@ function Start-CodexConsole {
   $null = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd
 }
 
+function Stop-CodexConsole {
+  param($cfg)
+  $stopped = $false
+  try {
+    $pattern = [regex]::Escape($cfg.CodexConsoleScript)
+    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $pattern }
+    foreach ($p in $procs) {
+      try {
+        Stop-Process -Id $p.ProcessId -Force
+        $stopped = $true
+      } catch {}
+    }
+  } catch {}
+  return $stopped
+}
+
 function Send-CodexConsolePrompt {
   param($cfg, $state, [string]$Prompt)
 
@@ -980,15 +996,24 @@ while ($true) {
         }
       }
       'codex.new' {
-        if ($cfg.CodexMode -eq 'console') { throw 'codexnew not supported in console mode.' }
         if (-not $req.prompt) { throw 'prompt missing.' }
-        $null = Refresh-CodexJobState -cfg $cfg -state $state
-        if ($cfg.CodexAsync) {
-          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        if ($cfg.CodexMode -eq 'console') {
+          $null = Stop-CodexConsole -cfg $cfg
+          Start-CodexConsole -cfg $cfg
+          Start-Sleep -Seconds $cfg.CodexStartWaitSec
+          $state.codex_console_offset = 0
+          Save-State -cfg $cfg -state $state
+          $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
+          $resp = @{ ok = $true; result = @{ output = $outText } }
         } else {
-          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          $null = Refresh-CodexJobState -cfg $cfg -state $state
+          if ($cfg.CodexAsync) {
+            $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          } else {
+            $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          }
+          $resp = @{ ok = $true; result = $out }
         }
-        $resp = @{ ok = $true; result = $out }
       }
       'codex.start' {
         $state.codex_has_session = $true

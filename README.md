@@ -69,6 +69,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
+  - In console mode, `codexnew <prompt>` restarts the console window first, then sends the prompt (fresh session).
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.
