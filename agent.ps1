@@ -277,6 +277,15 @@ function Stop-CodexConsole {
       [System.Windows.Forms.SendKeys]::SendWait("^+w")
       Start-Sleep -Milliseconds 200
     }
+    if ($cfg.CodexWindowTitle) {
+      for ($i = 0; $i -lt 5; $i++) {
+        $ok = $false
+        try { $ok = $shell.AppActivate($cfg.CodexWindowTitle) } catch { $ok = $false }
+        if (-not $ok) { break }
+        [System.Windows.Forms.SendKeys]::SendWait("^+w")
+        Start-Sleep -Milliseconds 200
+      }
+    }
   } catch {}
 
   $consolePids = New-Object 'System.Collections.Generic.HashSet[int]'
