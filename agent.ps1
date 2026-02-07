@@ -107,6 +107,8 @@ function Get-Config {
     $cfg.AllowPrefixes = $env:ALLOW_PREFIXES.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
   }
   if ($env:TAIL_LINES) { $cfg.TailLines = [int]$env:TAIL_LINES }
+  if ($env:LOG_DIR) { $cfg.LogDir = $env:LOG_DIR }
+  if ($env:STATE_FILE) { $cfg.StateFile = $env:STATE_FILE }
   if ($env:CODEX_BASE_CMD) { $cfg.CodexBaseCmd = $env:CODEX_BASE_CMD }
   if ($env:CODEX_MODEL) { $cfg.CodexModel = $env:CODEX_MODEL }
   if ($env:CODEX_TIMEOUT_SEC) { $cfg.CodexTimeoutSec = [int]$env:CODEX_TIMEOUT_SEC }
