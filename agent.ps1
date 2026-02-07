@@ -83,6 +83,7 @@ function Get-Config {
     CodexModel = ''
     CodexReasoningEffort = ''
     CodexNewDelaySec = 0
+    CodexModeOverride = ''
     CodexUserConfigPath = ''
     CodexUserConfigModel = ''
     CodexUserConfigReasoningEffort = ''
@@ -124,6 +125,7 @@ function Get-Config {
   if ($env:CODEX_AUTO_INIT) { $cfg.CodexAutoInit = ($env:CODEX_AUTO_INIT -match '^(1|true|yes)$') }
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
   if ($env:CODEX_APPEND_SESSION) { $cfg.CodexAppendSession = ($env:CODEX_APPEND_SESSION -match '^(1|true|yes)$') }
+  if ($env:CODEX_MODE_OVERRIDE) { $cfg.CodexModeOverride = $env:CODEX_MODE_OVERRIDE }
 
   if (-not (Test-Path -LiteralPath $cfg.RunnerPath)) {
     throw "runner.ps1 missing at $($cfg.RunnerPath)"
@@ -393,6 +395,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_mode_override' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_pid' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_prompt' -Value $null
@@ -415,6 +418,7 @@ function Load-State {
     codex_cwd = $null
     codex_model = $null
     codex_reasoning_effort = $null
+    codex_mode_override = $null
     codex_job_id = $null
     codex_job_pid = $null
     codex_job_prompt = $null
@@ -611,6 +615,16 @@ function Get-ActiveCodexReasoningEffort {
   if ($cfg.CodexReasoningEffort) { return $cfg.CodexReasoningEffort }
   if ($cfg.CodexUserConfigReasoningEffort) { return $cfg.CodexUserConfigReasoningEffort }
   return ''
+}
+
+function Get-EffectiveCodexMode {
+  param($cfg, $state)
+  $mode = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_mode_override' -and $state.codex_mode_override) { $mode = $state.codex_mode_override }
+  elseif ($cfg.CodexModeOverride) { $mode = $cfg.CodexModeOverride }
+  elseif ($cfg.CodexMode) { $mode = $cfg.CodexMode }
+  if (-not $mode) { $mode = 'exec' }
+  return $mode.ToLowerInvariant()
 }
 
 function Test-ProcessRunning {
@@ -944,9 +958,10 @@ while ($true) {
         $activeModel = $null
         if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $activeModel = $state.codex_model }
         elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
+        $activeMode = Get-EffectiveCodexMode -cfg $cfg -state $state
         $null = Refresh-CodexJobState -cfg $cfg -state $state
         $job = Get-CodexJobInfo -cfg $cfg -state $state
-        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel; codex_job = $job } }
+        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel; codex_mode = $activeMode; codex_mode_override = $state.codex_mode_override; codex_job = $job } }
       }
       'run' {
         if (-not $req.cmd) { throw 'cmd missing.' }
@@ -982,7 +997,8 @@ while ($true) {
       }
       'codex.send' {
         if (-not $req.prompt) { throw 'prompt missing.' }
-        if ($cfg.CodexMode -eq 'console') {
+        $mode = Get-EffectiveCodexMode -cfg $cfg -state $state
+        if ($mode -eq 'console') {
           $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
           $resp = @{ ok = $true; result = @{ output = $outText } }
         } else {
@@ -1010,7 +1026,8 @@ while ($true) {
         $resp = @{ ok = $true; result = $out }
       }
       'codex.new' {
-        if ($cfg.CodexMode -eq 'console') {
+        $mode = Get-EffectiveCodexMode -cfg $cfg -state $state
+        if ($mode -eq 'console') {
           $null = Stop-CodexConsole -cfg $cfg
           Start-CodexConsole -cfg $cfg
           Start-Sleep -Seconds $cfg.CodexStartWaitSec
@@ -1024,7 +1041,13 @@ while ($true) {
             $resp = @{ ok = $true; result = @{ output = $outText } }
           }
         } else {
-          if (-not $req.prompt) { throw 'prompt missing.' }
+          if (-not $req.prompt) {
+            $state.codex_session_id = $null
+            $state.codex_has_session = $false
+            Save-State -cfg $cfg -state $state
+            $resp = @{ ok = $true; result = @{ output = 'Exec session reset.' } }
+            break
+          }
           $null = Refresh-CodexJobState -cfg $cfg -state $state
           if ($cfg.CodexAsync) {
             $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
@@ -1035,7 +1058,13 @@ while ($true) {
         }
       }
       'codex.new.exec' {
-        if (-not $req.prompt) { throw 'prompt missing.' }
+        if (-not $req.prompt) {
+          $state.codex_session_id = $null
+          $state.codex_has_session = $false
+          Save-State -cfg $cfg -state $state
+          $resp = @{ ok = $true; result = @{ output = 'Exec session reset.' } }
+          break
+        }
         $null = Refresh-CodexJobState -cfg $cfg -state $state
         if ($cfg.CodexAsync) {
           $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
@@ -1077,6 +1106,10 @@ while ($true) {
         elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
         $resp = @{ ok = $true; result = @{ model = $activeModel; state_model = $state.codex_model; config_model = $cfg.CodexModel } }
       }
+      'codex.mode.get' {
+        $activeMode = Get-EffectiveCodexMode -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ mode = $activeMode; override = $state.codex_mode_override; config_mode = $cfg.CodexMode } }
+      }
       'codex.model' {
         $m = ''
         if ($req.model) { $m = [string]$req.model }
@@ -1109,6 +1142,21 @@ while ($true) {
 
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ model = $state.codex_model; reset = $doReset } }
+      }
+      'codex.mode' {
+        $m = ''
+        if ($req.mode) { $m = [string]$req.mode }
+        $m = $m.Trim().ToLowerInvariant()
+        if (-not $m -or $m -in @('default','clear','none')) {
+          $state.codex_mode_override = $null
+        } elseif ($m -in @('exec','console')) {
+          $state.codex_mode_override = $m
+        } else {
+          throw "Unknown mode: $m"
+        }
+        Save-State -cfg $cfg -state $state
+        $activeMode = Get-EffectiveCodexMode -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ mode = $activeMode; override = $state.codex_mode_override; config_mode = $cfg.CodexMode } }
       }
       'codex.use' {
         if (-not $req.session) { throw 'session missing.' }
