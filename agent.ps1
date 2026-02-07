@@ -263,6 +263,22 @@ function Start-CodexConsole {
 function Stop-CodexConsole {
   param($cfg, $state)
   $stopped = $false
+  $activated = $false
+  try {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    if ($state -and $state.PSObject.Properties.Name -contains 'codex_console_pid' -and $state.codex_console_pid) {
+      try { $activated = $shell.AppActivate([int]$state.codex_console_pid) } catch { $activated = $false }
+    }
+    if (-not $activated -and $cfg.CodexWindowTitle) {
+      try { $activated = $shell.AppActivate($cfg.CodexWindowTitle) } catch { $activated = $false }
+    }
+    if ($activated) {
+      [System.Windows.Forms.SendKeys]::SendWait("^+w")
+      Start-Sleep -Milliseconds 200
+    }
+  } catch {}
+
   $consolePids = New-Object 'System.Collections.Generic.HashSet[int]'
   if ($state -and $state.PSObject.Properties.Name -contains 'codex_console_pid' -and $state.codex_console_pid) {
     $null = $consolePids.Add([int]$state.codex_console_pid)
