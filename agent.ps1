@@ -78,6 +78,7 @@ function Get-Config {
     CodexConsoleAutoStart = $true
     CodexStartWaitSec = 8
     CodexSendKey = 'enter'
+    CodexSendKeyMethod = 'auto'
     ClientTimeoutSec = 300
     CodexDangerous = $true
     CodexModel = ''
@@ -116,6 +117,7 @@ function Get-Config {
   if ($env:CODEX_CONSOLE_AUTOSTART) { $cfg.CodexConsoleAutoStart = ($env:CODEX_CONSOLE_AUTOSTART -match '^(1|true|yes)$') }
   if ($env:CODEX_START_WAIT_SEC) { $cfg.CodexStartWaitSec = [int]$env:CODEX_START_WAIT_SEC }
   if ($env:CODEX_SEND_KEY) { $cfg.CodexSendKey = $env:CODEX_SEND_KEY }
+  if ($env:CODEX_SEND_KEY_METHOD) { $cfg.CodexSendKeyMethod = $env:CODEX_SEND_KEY_METHOD }
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
   if ($env:CODEX_NEW_DELAY_SEC) { $cfg.CodexNewDelaySec = [int]$env:CODEX_NEW_DELAY_SEC }
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
@@ -304,9 +306,26 @@ function Stop-CodexConsole {
 }
 
 function Send-KeyCombo {
-  param([string]$Combo)
+  param([string]$Combo, [string]$Method)
   if (-not $Combo) { $Combo = 'enter' }
   $combo = $Combo.Trim().ToLowerInvariant()
+  $method = if ($Method) { $Method.Trim().ToLowerInvariant() } else { 'sendinput' }
+
+  $sendKeysMap = @{
+    'enter'      = '{ENTER}'
+    'ctrl+enter' = '^{ENTER}'
+    'shift+enter' = '+{ENTER}'
+    'alt+enter'  = '%{ENTER}'
+    'ctrl+d'     = '^d'
+    'ctrl+z'     = '^z'
+  }
+
+  if ($method -eq 'sendkeys') {
+    $seq = $sendKeysMap[$combo]
+    if (-not $seq) { $seq = '{ENTER}' }
+    [System.Windows.Forms.SendKeys]::SendWait($seq)
+    return
+  }
 
   if (-not ('NativeInput' -as [type])) {
     Add-Type @"
@@ -390,7 +409,9 @@ public static class NativeInput {
   } catch {}
 
   # fallback
-  [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+  $fallbackSeq = $sendKeysMap[$combo]
+  if (-not $fallbackSeq) { $fallbackSeq = '{ENTER}' }
+  [System.Windows.Forms.SendKeys]::SendWait($fallbackSeq)
 }
 
 function Send-CodexConsolePrompt {
@@ -423,7 +444,15 @@ function Send-CodexConsolePrompt {
 
   Start-Sleep -Milliseconds 200
   [System.Windows.Forms.SendKeys]::SendWait($Prompt)
-  Send-KeyCombo -Combo $cfg.CodexSendKey
+  $sendMethod = $cfg.CodexSendKeyMethod
+  if (-not $sendMethod -or $sendMethod -eq 'auto') {
+    $sendMethod = 'sendinput'
+    try {
+      $proc = Get-Process | Where-Object { $_.MainWindowTitle -eq $cfg.CodexWindowTitle } | Select-Object -First 1
+      if ($proc -and $proc.ProcessName -match '^(windowsterminal|wt)$') { $sendMethod = 'sendkeys' }
+    } catch {}
+  }
+  Send-KeyCombo -Combo $cfg.CodexSendKey -Method $sendMethod
 
   Start-Sleep -Seconds $cfg.CodexWaitSec
 
