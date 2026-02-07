@@ -74,6 +74,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
   - In console mode, `codexnew <prompt>` restarts the console window first, then sends the prompt (fresh session).
   - `codexnew` with no prompt just restarts the console (useful for resuming manually).
   - `CODEX_NEW_DELAY_SEC` (default 0): extra delay (seconds) after restarting console on `codexnew` before sending the prompt.
+  - If Enter doesn't submit in your console, set `CODEX_SEND_KEY=ctrl+enter` (default is `enter`).
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.

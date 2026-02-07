@@ -609,6 +609,15 @@ function Handle-Command {
         }
       }
 
+      # Allow "codex console ..." and "codex exec ..." shorthands.
+      if ($subCmd -eq 'console') {
+        $cmd = 'codexconsole'
+        $rest = $subRest
+      } elseif ($subCmd -eq 'exec') {
+        $cmd = 'codexexec'
+        $rest = $subRest
+      }
+
       if ($subCmd -eq 'last' -and (-not $subRest -or $subRest -match '^[0-9]+$')) {
         $cmd = 'codexlast'
         $rest = $subRest
