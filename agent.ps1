@@ -82,6 +82,7 @@ function Get-Config {
     CodexDangerous = $true
     CodexModel = ''
     CodexReasoningEffort = ''
+    CodexNewDelaySec = 0
     CodexUserConfigPath = ''
     CodexUserConfigModel = ''
     CodexUserConfigReasoningEffort = ''
@@ -115,6 +116,7 @@ function Get-Config {
   if ($env:CODEX_START_WAIT_SEC) { $cfg.CodexStartWaitSec = [int]$env:CODEX_START_WAIT_SEC }
   if ($env:CODEX_SEND_KEY) { $cfg.CodexSendKey = $env:CODEX_SEND_KEY }
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
+  if ($env:CODEX_NEW_DELAY_SEC) { $cfg.CodexNewDelaySec = [int]$env:CODEX_NEW_DELAY_SEC }
   if ($env:CLIENT_TIMEOUT_SEC) { $cfg.ClientTimeoutSec = [int]$env:CLIENT_TIMEOUT_SEC }
   if ($env:CODEX_DANGEROUS) { $cfg.CodexDangerous = ($env:CODEX_DANGEROUS -match '^(1|true|yes)$') }
   if ($env:CODEX_REASONING_EFFORT) { $cfg.CodexReasoningEffort = $env:CODEX_REASONING_EFFORT }
@@ -996,16 +998,21 @@ while ($true) {
         }
       }
       'codex.new' {
-        if (-not $req.prompt) { throw 'prompt missing.' }
         if ($cfg.CodexMode -eq 'console') {
           $null = Stop-CodexConsole -cfg $cfg
           Start-CodexConsole -cfg $cfg
           Start-Sleep -Seconds $cfg.CodexStartWaitSec
+          if ($cfg.CodexNewDelaySec -gt 0) { Start-Sleep -Seconds $cfg.CodexNewDelaySec }
           $state.codex_console_offset = 0
           Save-State -cfg $cfg -state $state
-          $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
-          $resp = @{ ok = $true; result = @{ output = $outText } }
+          if (-not $req.prompt) {
+            $resp = @{ ok = $true; result = @{ output = 'Console restarted.' } }
+          } else {
+            $outText = Send-CodexConsolePrompt -cfg $cfg -state $state -Prompt $req.prompt
+            $resp = @{ ok = $true; result = @{ output = $outText } }
+          }
         } else {
+          if (-not $req.prompt) { throw 'prompt missing.' }
           $null = Refresh-CodexJobState -cfg $cfg -state $state
           if ($cfg.CodexAsync) {
             $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false

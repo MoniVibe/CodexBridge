@@ -36,7 +36,7 @@ pwsh -NoProfile -File .\broker.ps1
 ## Telegram Commands
 Target prefix is optional:
 - `[<target>] codex <prompt>`: send prompt to the active Codex thread
-- `[<target>] codexnew <prompt>`: fresh thread for this prompt (no resume)
+- `[<target>] codexnew [prompt]`: fresh thread for this prompt (no resume). In console mode, omitting the prompt just restarts the console window.
 - `[<target>] codexfresh <prompt>`: reset thread then run prompt
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
@@ -70,6 +70,8 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
   - In console mode, `codexnew <prompt>` restarts the console window first, then sends the prompt (fresh session).
+  - `codexnew` with no prompt just restarts the console (useful for resuming manually).
+  - `CODEX_NEW_DELAY_SEC` (default 0): extra delay (seconds) after restarting console on `codexnew` before sending the prompt.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.
@@ -124,4 +126,6 @@ pwsh -NoProfile -File .\update_and_start.ps1 -Role both
 On laptops, broker autostart is disabled by default. Override with:
 - `set TELEBOT_AUTOSTART=1` then run the script, or
 - `pwsh -NoProfile -File .\update_and_start.ps1 -Force`
+
+
 

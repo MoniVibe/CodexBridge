@@ -529,7 +529,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew <prompt> | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -619,8 +619,9 @@ function Handle-Command {
       return
     }
     'codexnew' {
-      if (-not $rest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codexnew <prompt>'; return }
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new'; prompt = $rest }
+      $payload = @{ op = 'codex.new' }
+      if ($rest) { $payload.prompt = $rest }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
