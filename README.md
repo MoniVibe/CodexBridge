@@ -78,6 +78,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.
 - Broker clears any webhook on startup and refuses to run if another broker is already active.
+- By default, the broker exits after repeated 409 conflicts (another broker polling the same bot). Configure `BROKER_EXIT_ON_409` and `BROKER_EXIT_ON_409_THRESHOLD` in `broker.env` to adjust.
 - Multi-line Telegram messages are treated as separate commands (one per line).
 - If a target agent is offline, the broker fails fast (see `AGENT_CONNECT_TIMEOUT_SEC` in `broker.env`).
 

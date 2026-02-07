@@ -9,6 +9,8 @@ try { $Host.UI.RawUI.WindowTitle = 'TelebotBroker' } catch {}
 
 $script:BrokerMutex = $null
 $script:LastWebhookClear = Get-Date '1900-01-01'
+$script:Consecutive409 = 0
+$script:Last409At = $null
 
 function Import-DotEnv {
   param([string]$Path)
@@ -49,6 +51,8 @@ function Get-Config {
     SttTimeoutSec = 120
     VoiceDir = (Join-Path $PSScriptRoot 'logs')
     VoiceTarget = $null
+    ExitOn409 = $true
+    ExitOn409Threshold = 3
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -68,6 +72,8 @@ function Get-Config {
   if ($env:STT_CMD) { $cfg.SttCmd = $env:STT_CMD }
   if ($env:STT_TIMEOUT_SEC) { $cfg.SttTimeoutSec = [int]$env:STT_TIMEOUT_SEC }
   if ($env:VOICE_TARGET) { $cfg.VoiceTarget = $env:VOICE_TARGET }
+  if ($env:BROKER_EXIT_ON_409) { $cfg.ExitOn409 = ($env:BROKER_EXIT_ON_409 -match '^(1|true|yes)$') }
+  if ($env:BROKER_EXIT_ON_409_THRESHOLD) { $cfg.ExitOn409Threshold = [int]$env:BROKER_EXIT_ON_409_THRESHOLD }
   if ($env:BROKER_STATE_FILE) { $cfg.StateFile = $env:BROKER_STATE_FILE }
 
   $all = [System.Environment]::GetEnvironmentVariables()
@@ -255,6 +261,10 @@ function Get-TgUpdates {
     Write-BotLog -Path $cfg.BotLog -Message "getUpdates failed: $($_.Exception.Message)"
     if ($_.Exception.Message -match '\b409\b') {
       Maybe-ClearWebhook -cfg $cfg -Reason '409 conflict'
+      $script:Consecutive409 += 1
+      $script:Last409At = Get-Date
+    } else {
+      $script:Consecutive409 = 0
     }
     return @{ ok = $false; result = @() }
   }
@@ -925,6 +935,12 @@ while ($true) {
   }
 
   $updates = Get-TgUpdates -cfg $cfg -Offset $offset
+  if ($cfg.ExitOn409 -and $script:Consecutive409 -ge $cfg.ExitOn409Threshold) {
+    Write-BotLog -Path $cfg.BotLog -Message "Exiting after $($script:Consecutive409) consecutive 409 conflicts (another broker is polling this bot)."
+    Write-Host "Broker exiting: another broker is polling this bot (409 conflict)."
+    exit 2
+  }
+
   if ($updates.ok -and $updates.result) {
     foreach ($update in $updates.result) {
       $offset = [int]$update.update_id + 1
