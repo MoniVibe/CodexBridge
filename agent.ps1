@@ -997,6 +997,18 @@ while ($true) {
           $resp = @{ ok = $true; result = $out }
         }
       }
+      'codex.send.exec' {
+        if (-not $req.prompt) { throw 'prompt missing.' }
+        $null = Refresh-CodexJobState -cfg $cfg -state $state
+        $resume = $false
+        if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $resume = $true }
+        if ($cfg.CodexAsync) {
+          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
+        } else {
+          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
+        }
+        $resp = @{ ok = $true; result = $out }
+      }
       'codex.new' {
         if ($cfg.CodexMode -eq 'console') {
           $null = Stop-CodexConsole -cfg $cfg
@@ -1021,6 +1033,16 @@ while ($true) {
           }
           $resp = @{ ok = $true; result = $out }
         }
+      }
+      'codex.new.exec' {
+        if (-not $req.prompt) { throw 'prompt missing.' }
+        $null = Refresh-CodexJobState -cfg $cfg -state $state
+        if ($cfg.CodexAsync) {
+          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        } else {
+          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+        }
+        $resp = @{ ok = $true; result = $out }
       }
       'codex.start' {
         $state.codex_has_session = $true

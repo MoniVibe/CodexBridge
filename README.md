@@ -38,6 +38,8 @@ Target prefix is optional:
 - `[<target>] codex <prompt>`: send prompt to the active Codex thread
 - `[<target>] codexnew [prompt]`: fresh thread for this prompt (no resume). In console mode, omitting the prompt just restarts the console window.
 - `[<target>] codexfresh <prompt>`: reset thread then run prompt
+- `[<target>] codexexec <prompt>`: force exec mode for this prompt (bypasses console mode)
+- `[<target>] codexexecnew <prompt>`: force exec mode with a fresh thread
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
