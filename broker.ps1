@@ -730,6 +730,19 @@ function Handle-Command {
         $jobPid = $null
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+
+        if ($parsed.prompt -and ($out -eq '(no output yet)' -or $out -eq '(sent; no output yet)')) {
+          $fallback = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $parsed.prompt }
+          if ($fallback.ok) {
+            $resp = $fallback
+            $out = $resp.result.output
+            $jobId = $null
+            $jobPid = $null
+            if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+            if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+          }
+        }
+
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (console). I'll reply here when it's done.")
