@@ -438,7 +438,7 @@ function Build-VoiceCommand {
   if (-not $clean) { return $clean }
   if (Is-KnownCommandOrTarget -cfg $cfg -Text $clean) { return $clean }
   $target = if ($cfg.VoiceTarget) { $cfg.VoiceTarget } else { $cfg.DefaultTarget }
-  return "$target codex $clean"
+  return "$target codexexec $clean"
 }
 
 function Handle-VoiceMessage {
@@ -550,7 +550,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -890,7 +890,7 @@ function Handle-Command {
         return
       }
 
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $promptText; session = 'default'; auto_start = $true }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $promptText; session = 'default'; auto_start = $true }
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
@@ -899,7 +899,7 @@ function Handle-Command {
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
