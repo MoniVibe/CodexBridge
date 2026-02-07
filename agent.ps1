@@ -261,23 +261,16 @@ function Start-CodexConsole {
 function Stop-CodexConsole {
   param($cfg, $state)
   $stopped = $false
+  $consolePids = New-Object 'System.Collections.Generic.HashSet[int]'
   if ($state -and $state.PSObject.Properties.Name -contains 'codex_console_pid' -and $state.codex_console_pid) {
-    try {
-      Stop-Process -Id ([int]$state.codex_console_pid) -Force
-      $stopped = $true
-    } catch {}
+    $null = $consolePids.Add([int]$state.codex_console_pid)
     $state.codex_console_pid = $null
     try { Save-State -cfg $cfg -state $state } catch {}
   }
   try {
     $pattern = [regex]::Escape($cfg.CodexConsoleScript)
     $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match $pattern }
-    foreach ($p in $procs) {
-      try {
-        Stop-Process -Id $p.ProcessId -Force
-        $stopped = $true
-      } catch {}
-    }
+    foreach ($p in $procs) { $null = $consolePids.Add([int]$p.ProcessId) }
   } catch {}
   try {
     $title = $cfg.CodexWindowTitle
@@ -285,14 +278,28 @@ function Stop-CodexConsole {
       $uiProcs = Get-Process | Where-Object {
         $_.MainWindowTitle -eq $title -and ($_.ProcessName -match '^(pwsh|powershell)$')
       }
-      foreach ($p in $uiProcs) {
+      foreach ($p in $uiProcs) { $null = $consolePids.Add([int]$p.Id) }
+    }
+  } catch {}
+  if ($consolePids.Count -gt 0) {
+    try {
+      $childCodex = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'codex.exe' -and $consolePids.Contains([int]$_.ParentProcessId)
+      }
+      foreach ($p in $childCodex) {
         try {
-          Stop-Process -Id $p.Id -Force
+          Stop-Process -Id $p.ProcessId -Force
           $stopped = $true
         } catch {}
       }
+    } catch {}
+    foreach ($pid in $consolePids) {
+      try {
+        Stop-Process -Id $pid -Force
+        $stopped = $true
+      } catch {}
     }
-  } catch {}
+  }
   return $stopped
 }
 
@@ -301,47 +308,86 @@ function Send-KeyCombo {
   if (-not $Combo) { $Combo = 'enter' }
   $combo = $Combo.Trim().ToLowerInvariant()
 
-  if (-not ('NativeKey' -as [type])) {
+  if (-not ('NativeInput' -as [type])) {
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class NativeKey {
+public static class NativeInput {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct INPUT {
+    public uint type;
+    public InputUnion U;
+  }
+  [StructLayout(LayoutKind.Explicit)]
+  public struct InputUnion {
+    [FieldOffset(0)] public KEYBDINPUT ki;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct KEYBDINPUT {
+    public ushort wVk;
+    public ushort wScan;
+    public uint dwFlags;
+    public uint time;
+    public IntPtr dwExtraInfo;
+  }
+  public const uint INPUT_KEYBOARD = 1;
   [DllImport("user32.dll", SetLastError=true)]
-  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
   public const uint KEYEVENTF_KEYUP = 0x0002;
+
+  public static void SendKeyCombo(params ushort[] vks) {
+    if (vks == null || vks.Length == 0) return;
+    INPUT[] inputs = new INPUT[vks.Length * 2];
+    int idx = 0;
+    for (int i = 0; i < vks.Length; i++) {
+      inputs[idx] = new INPUT();
+      inputs[idx].type = INPUT_KEYBOARD;
+      inputs[idx].U.ki.wVk = vks[i];
+      idx++;
+    }
+    for (int i = vks.Length - 1; i >= 0; i--) {
+      inputs[idx] = new INPUT();
+      inputs[idx].type = INPUT_KEYBOARD;
+      inputs[idx].U.ki.wVk = vks[i];
+      inputs[idx].U.ki.dwFlags = KEYEVENTF_KEYUP;
+      idx++;
+    }
+    SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+  }
 }
 "@
   }
 
-  function KeyDown([byte]$vk) { [NativeKey]::keybd_event($vk, 0, 0, [UIntPtr]::Zero) }
-  function KeyUp([byte]$vk) { [NativeKey]::keybd_event($vk, 0, [NativeKey]::KEYEVENTF_KEYUP, [UIntPtr]::Zero) }
+  $keys = @()
 
   switch ($combo) {
     'enter' {
-      KeyDown 0x0D; KeyUp 0x0D
-      return
+      $keys = @(0x0D)
     }
     'ctrl+enter' {
-      KeyDown 0x11; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x11
-      return
+      $keys = @(0x11, 0x0D)
     }
     'shift+enter' {
-      KeyDown 0x10; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x10
-      return
+      $keys = @(0x10, 0x0D)
     }
     'alt+enter' {
-      KeyDown 0x12; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x12
-      return
+      $keys = @(0x12, 0x0D)
     }
     'ctrl+d' {
-      KeyDown 0x11; KeyDown 0x44; KeyUp 0x44; KeyUp 0x11
-      return
+      $keys = @(0x11, 0x44)
     }
     'ctrl+z' {
-      KeyDown 0x11; KeyDown 0x5A; KeyUp 0x5A; KeyUp 0x11
-      return
+      $keys = @(0x11, 0x5A)
+    }
+    default {
+      $keys = @(0x0D)
     }
   }
+
+  try {
+    [NativeInput]::SendKeyCombo([ushort[]]$keys)
+    return
+  } catch {}
 
   # fallback
   [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
