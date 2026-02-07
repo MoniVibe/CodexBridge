@@ -574,6 +574,33 @@ function Handle-Command {
       return
     }
     'last' {
+      if ($rest -and ($rest -notmatch '^\d+$')) {
+        # Treat natural language that starts with "last" as a prompt, not a command.
+        $promptText = $raw
+        if ($cfg.Targets.ContainsKey($token1Lower) -and $rest1) { $promptText = $rest1 }
+        if (-not (Trim-WhitespaceLike -Text $promptText)) {
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Unknown command. Send help for usage.'
+          return
+        }
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $promptText; session = 'default'; auto_start = $true }
+        if ($resp.ok) {
+          $out = $resp.result.output
+          $jobId = $null
+          $jobPid = $null
+          if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+          if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+          if ($jobId -and $jobPid) {
+            Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
+            Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
+          } else {
+            if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+            Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+          }
+        } else {
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        }
+        return
+      }
       $lines = if ($rest -match '^\d+$') { [int]$rest } else { $null }
       $payload = @{ op = 'last' }
       if ($lines) { $payload.lines = $lines }
