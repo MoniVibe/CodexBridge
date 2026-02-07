@@ -293,9 +293,9 @@ function Stop-CodexConsole {
         } catch {}
       }
     } catch {}
-    foreach ($pid in $consolePids) {
+    foreach ($procId in $consolePids) {
       try {
-        Stop-Process -Id $pid -Force
+        Stop-Process -Id $procId -Force
         $stopped = $true
       } catch {}
     }
