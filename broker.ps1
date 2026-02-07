@@ -53,6 +53,7 @@ function Get-Config {
     VoiceTarget = $null
     ExitOn409 = $true
     ExitOn409Threshold = 3
+    ConsoleFallbackExec = $false
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -74,6 +75,7 @@ function Get-Config {
   if ($env:VOICE_TARGET) { $cfg.VoiceTarget = $env:VOICE_TARGET }
   if ($env:BROKER_EXIT_ON_409) { $cfg.ExitOn409 = ($env:BROKER_EXIT_ON_409 -match '^(1|true|yes)$') }
   if ($env:BROKER_EXIT_ON_409_THRESHOLD) { $cfg.ExitOn409Threshold = [int]$env:BROKER_EXIT_ON_409_THRESHOLD }
+  if ($env:CONSOLE_FALLBACK_EXEC) { $cfg.ConsoleFallbackExec = ($env:CONSOLE_FALLBACK_EXEC -match '^(1|true|yes)$') }
   if ($env:BROKER_STATE_FILE) { $cfg.StateFile = $env:BROKER_STATE_FILE }
 
   $all = [System.Environment]::GetEnvironmentVariables()
@@ -731,7 +733,7 @@ function Handle-Command {
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
 
-        if ($parsed.prompt -and ($out -eq '(no output yet)' -or $out -eq '(sent; no output yet)')) {
+        if ($cfg.ConsoleFallbackExec -and $parsed.prompt -and ($out -eq '(no output yet)' -or $out -eq '(sent; no output yet)')) {
           $fallback = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $parsed.prompt }
           if ($fallback.ok) {
             $resp = $fallback
