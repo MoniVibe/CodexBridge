@@ -603,10 +603,10 @@ function Handle-Command {
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
-        $pid = $null
+        $jobPid = $null
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
-        if ($jobId -and $pid) {
+        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+        if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
         } else {
@@ -624,10 +624,10 @@ function Handle-Command {
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
-        $pid = $null
+        $jobPid = $null
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
-        if ($jobId -and $pid) {
+        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+        if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
         } else {
@@ -645,10 +645,10 @@ function Handle-Command {
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
-        $pid = $null
+        $jobPid = $null
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
-        if ($jobId -and $pid) {
+        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+        if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
         } else {
@@ -756,10 +756,10 @@ function Handle-Command {
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
-        $pid = $null
+        $jobPid = $null
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $pid = [string]$resp.result.pid }
-        if ($jobId -and $pid) {
+        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+        if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
         } else {
