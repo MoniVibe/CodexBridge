@@ -279,7 +279,72 @@ function Stop-CodexConsole {
       } catch {}
     }
   } catch {}
+  try {
+    $title = $cfg.CodexWindowTitle
+    if ($title) {
+      $uiProcs = Get-Process | Where-Object {
+        $_.MainWindowTitle -eq $title -and ($_.ProcessName -match '^(pwsh|powershell)$')
+      }
+      foreach ($p in $uiProcs) {
+        try {
+          Stop-Process -Id $p.Id -Force
+          $stopped = $true
+        } catch {}
+      }
+    }
+  } catch {}
   return $stopped
+}
+
+function Send-KeyCombo {
+  param([string]$Combo)
+  if (-not $Combo) { $Combo = 'enter' }
+  $combo = $Combo.Trim().ToLowerInvariant()
+
+  if (-not ('NativeKey' -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeKey {
+  [DllImport("user32.dll", SetLastError=true)]
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public const uint KEYEVENTF_KEYUP = 0x0002;
+}
+"@
+  }
+
+  function KeyDown([byte]$vk) { [NativeKey]::keybd_event($vk, 0, 0, [UIntPtr]::Zero) }
+  function KeyUp([byte]$vk) { [NativeKey]::keybd_event($vk, 0, [NativeKey]::KEYEVENTF_KEYUP, [UIntPtr]::Zero) }
+
+  switch ($combo) {
+    'enter' {
+      KeyDown 0x0D; KeyUp 0x0D
+      return
+    }
+    'ctrl+enter' {
+      KeyDown 0x11; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x11
+      return
+    }
+    'shift+enter' {
+      KeyDown 0x10; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x10
+      return
+    }
+    'alt+enter' {
+      KeyDown 0x12; KeyDown 0x0D; KeyUp 0x0D; KeyUp 0x12
+      return
+    }
+    'ctrl+d' {
+      KeyDown 0x11; KeyDown 0x44; KeyUp 0x44; KeyUp 0x11
+      return
+    }
+    'ctrl+z' {
+      KeyDown 0x11; KeyDown 0x5A; KeyUp 0x5A; KeyUp 0x11
+      return
+    }
+  }
+
+  # fallback
+  [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
 }
 
 function Send-CodexConsolePrompt {
@@ -312,11 +377,7 @@ function Send-CodexConsolePrompt {
 
   Start-Sleep -Milliseconds 200
   [System.Windows.Forms.SendKeys]::SendWait($Prompt)
-  switch ($cfg.CodexSendKey.ToLowerInvariant()) {
-    'ctrl+enter' { [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}") }
-    'shift+enter' { [System.Windows.Forms.SendKeys]::SendWait("+{ENTER}") }
-    default { [System.Windows.Forms.SendKeys]::SendWait("{ENTER}") }
-  }
+  Send-KeyCombo -Combo $cfg.CodexSendKey
 
   Start-Sleep -Seconds $cfg.CodexWaitSec
 
