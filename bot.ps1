@@ -35,8 +35,8 @@ function Get-Config {
     StateFile = (Join-Path $PSScriptRoot 'state.json')
     JobsFile = (Join-Path $PSScriptRoot 'jobs.json')
     RunnerPath = (Join-Path $PSScriptRoot 'runner.ps1')
-    DefaultCwd = 'C:\\dev\\tri'
-    AllowPrefixes = @('git','pwsh','python','dotnet','cmd','C:\\dev\\tri')
+    DefaultCwd = 'C:\\dev\\unity_clean'
+    AllowPrefixes = @('git','pwsh','python','dotnet','cmd','C:\\dev\\unity_clean')
     MaxMessageChars = 3500
     TailLines = 80
     PollTimeoutSec = 20

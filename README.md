@@ -36,23 +36,16 @@ pwsh -NoProfile -File .\broker.ps1
 ## Telegram Commands
 Target prefix is optional:
 - `[<target>] codex <prompt>`: send prompt to the active Codex thread
-- `[<target>] codexnew [prompt]`: new thread (exec) or restart console (console mode). In console mode, the prompt is not auto-sent.
-- `[<target>] codexfresh [prompt]`: alias of `codexnew`
-- `[<target>] codexexec <prompt>`: force exec mode for this prompt (even if `CODEX_MODE=console`)
-- `[<target>] codexexec`: switch agent to exec mode (persisted to `agent.env`)
-- `[<target>] codexconsole`: switch agent to console mode and launch the console (persisted to `agent.env`)
-- `[<target>] codexsendkey [enter|ctrl+enter|shift+enter]`: show or set the console send key (persisted to `agent.env`)
-- Console input uses SendKeys and requires the Codex window to be focused; if focus fails, the agent will refuse to send the prompt.
-- Set `CODEX_CONSOLE_STRICT_FOCUS=0` to allow sending even if focus detection is unreliable.
-- Default: plain prompts (no command prefix) are sent via `codexexec` for now.
-- `codex console <prompt>` is treated as `codex <prompt>` (sends to console when in console mode).
+- `[<target>] codexnew [prompt]`: fresh thread for this prompt (no resume). In console mode, omitting the prompt just restarts the console window.
+- `[<target>] codexfresh <prompt>`: reset thread then run prompt
+- `[<target>] codexexec [new] [prompt]`: switch to exec mode. With `new`, clears the exec session (optionally sends a prompt).
+- `[<target>] codexconsole [new] [prompt]`: switch to console mode. With `new`, restarts the console (optionally sends a prompt).
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
 - `[<target>] codexjob`: show current Codex job status (async mode)
 - `[<target>] codexcancel` (alias: `cancel`): cancel the running Codex job (async mode)
-- `[<target>] codexresume <thread_id>`: resume a specific thread id (alias of `codexuse`)
-- `[<target>] codexuse <thread_id>`: resume a specific thread id
+- `[<target>] codexuse <thread_id>`: resume a specific thread id (alias: `codexresume`)
 - `[<target>] codexreset`: clear stored thread id
 - `[<target>] status`: show agent status
 
@@ -77,11 +70,17 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_CWD` to your preferred working directory.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
-- Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`. In console mode, `codexnew`/`codexfresh` restart the console (no auto-prompt), and `codexresume <thread_id>` restarts the console on that session.
+- Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
+  - In console mode, `codexnew <prompt>` restarts the console window first, then sends the prompt (fresh session).
+  - `codexnew` with no prompt just restarts the console (useful for resuming manually).
+  - `CODEX_NEW_DELAY_SEC` (default 0): extra delay (seconds) after restarting console on `codexnew` before sending the prompt.
+  - Codex console typically submits on `Ctrl+Enter`. If you see prompts only add a newline, set `CODEX_SEND_KEY=ctrl+enter`.
+  - If your console submits on Enter, set `CODEX_SEND_KEY=enter`.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.
 - Broker clears any webhook on startup and refuses to run if another broker is already active.
+- By default, the broker exits after repeated 409 conflicts (another broker polling the same bot). Configure `BROKER_EXIT_ON_409` and `BROKER_EXIT_ON_409_THRESHOLD` in `broker.env` to adjust.
 - Multi-line Telegram messages are treated as separate commands (one per line).
 - If a target agent is offline, the broker fails fast (see `AGENT_CONNECT_TIMEOUT_SEC` in `broker.env`).
 
@@ -93,7 +92,7 @@ Use `{input}` as a placeholder for the downloaded audio file path.
 
 Example (whisper.cpp):
 ```
-STT_CMD=whisper.exe -m C:\models\ggml-base.en.bin -f {input} -otxt -of C:\dev\tri\ops\telebot\logs\stt
+STT_CMD=whisper.exe -m C:\models\ggml-base.en.bin -f {input} -otxt -of C:\dev\unity_clean\CodexBridge\logs\stt
 ```
 
 Optional:
@@ -112,11 +111,11 @@ AGENT_SECRET=your_shared_secret
 ```
 
 Save it at:
-`C:\dev\tri\ops\telebot\secret.env`
+`C:\dev\unity_clean\CodexBridge\secret.env`
 
 2) Run the updater:
 ```powershell
-pwsh -NoProfile -File C:\dev\tri\ops\telebot\update_and_start.ps1
+pwsh -NoProfile -File C:\dev\unity_clean\CodexBridge\update_and_start.ps1
 ```
 
 You can also set `CODEXBRIDGE_AGENT_SECRET` or `TELEBOT_AGENT_SECRET` env vars instead of a file.
@@ -132,3 +131,6 @@ pwsh -NoProfile -File .\update_and_start.ps1 -Role both
 On laptops, broker autostart is disabled by default. Override with:
 - `set TELEBOT_AUTOSTART=1` then run the script, or
 - `pwsh -NoProfile -File .\update_and_start.ps1 -Force`
+
+
+

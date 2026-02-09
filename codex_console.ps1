@@ -1,12 +1,11 @@
 # Codex console launcher
 param(
   [string]$Title = 'CODEX_BRIDGE',
-  [string]$Transcript = "C:\dev\tri\ops\telebot\logs\codex_console.log",
-  [string]$WorkingDir = "C:\dev\tri",
+  [string]$Transcript = "C:\dev\unity_clean\CodexBridge\logs\codex_console.log",
+  [string]$WorkingDir = "C:\dev\unity_clean",
   [string]$ApprovalPolicy = 'never',
   [string]$Sandbox = 'danger-full-access',
-  [string]$Model = '',
-  [string]$ResumeThreadId = ''
+  [string]$Model = ''
 )
 
 $Host.UI.RawUI.WindowTitle = $Title
@@ -17,11 +16,9 @@ try {
   if (-not $Model -and $env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
   $args = @('--no-alt-screen', '-a', $ApprovalPolicy, '--sandbox', $Sandbox, '-C', $WorkingDir)
   if ($Model) { $args = @('-m', $Model) + $args }
-  if ($ResumeThreadId) {
-    codex resume @args $ResumeThreadId
-  } else {
-    codex @args
-  }
+  codex @args
 } finally {
   Stop-Transcript | Out-Null
 }
+
+
