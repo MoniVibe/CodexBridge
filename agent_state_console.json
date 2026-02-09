@@ -1,0 +1,21 @@
+{
+  "last_job_id": null,
+  "codex_has_session": true,
+  "codex_last_log": "C:\\dev\\unity_clean\\CodexBridge\\logs_console\\codex_exec_20260208_142157_1857.log",
+  "codex_session_id": "019c3411-9037-7c73-9cd8-481711bfdb03",
+  "codex_console_offset": 0,
+  "codex_console_pid": 27684,
+  "codex_cwd": "C:\\dev\\unity_clean",
+  "codex_model": null,
+  "codex_reasoning_effort": null,
+  "codex_mode_override": "exec",
+  "codex_job_id": null,
+  "codex_job_pid": null,
+  "codex_job_prompt": null,
+  "codex_job_outfile": null,
+  "codex_job_stdout": null,
+  "codex_job_stderr": null,
+  "codex_job_result": null,
+  "codex_job_exit": null,
+  "codex_job_started": null
+}
