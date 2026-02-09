@@ -9,3 +9,7 @@ broker.env
 agent.env
 config.env
 secret.env
+
+agent_console.env
+agent_state_console.json
+
