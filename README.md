@@ -36,13 +36,22 @@ pwsh -NoProfile -File .\broker.ps1
 ## Telegram Commands
 Target prefix is optional:
 - `[<target>] codex <prompt>`: send prompt to the active Codex thread
-- `[<target>] codexnew <prompt>`: fresh thread for this prompt (no resume)
-- `[<target>] codexfresh <prompt>`: reset thread then run prompt
+- `[<target>] codexnew [prompt]`: new thread (exec) or restart console (console mode). In console mode, the prompt is not auto-sent.
+- `[<target>] codexfresh [prompt]`: alias of `codexnew`
+- `[<target>] codexexec <prompt>`: force exec mode for this prompt (even if `CODEX_MODE=console`)
+- `[<target>] codexexec`: switch agent to exec mode (persisted to `agent.env`)
+- `[<target>] codexconsole`: switch agent to console mode and launch the console (persisted to `agent.env`)
+- `[<target>] codexsendkey [enter|ctrl+enter|shift+enter]`: show or set the console send key (persisted to `agent.env`)
+- Console input uses SendKeys and requires the Codex window to be focused; if focus fails, the agent will refuse to send the prompt.
+- Set `CODEX_CONSOLE_STRICT_FOCUS=0` to allow sending even if focus detection is unreliable.
+- Default: plain prompts (no command prefix) are sent via `codexexec` for now.
+- `codex console <prompt>` is treated as `codex <prompt>` (sends to console when in console mode).
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
 - `[<target>] codexjob`: show current Codex job status (async mode)
 - `[<target>] codexcancel` (alias: `cancel`): cancel the running Codex job (async mode)
+- `[<target>] codexresume <thread_id>`: resume a specific thread id (alias of `codexuse`)
 - `[<target>] codexuse <thread_id>`: resume a specific thread id
 - `[<target>] codexreset`: clear stored thread id
 - `[<target>] status`: show agent status
@@ -68,7 +77,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_CWD` to your preferred working directory.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
-- Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
+- Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`. In console mode, `codexnew`/`codexfresh` restart the console (no auto-prompt), and `codexresume <thread_id>` restarts the console on that session.
 - Logs live in `logs/` on each agent.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.

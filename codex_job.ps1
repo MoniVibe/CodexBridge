@@ -136,7 +136,7 @@ try {
     if (Test-Path -LiteralPath $StderrPath) { $combined += (Get-Content -LiteralPath $StderrPath -Raw -ErrorAction SilentlyContinue) }
   } catch {}
 
-  if ($combined -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
+  if ($combined -match '"thread_id"\s*:\s*"([0-9a-f-]{16,})"') {
     $threadId = $Matches[1]
   }
 

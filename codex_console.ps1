@@ -5,7 +5,8 @@ param(
   [string]$WorkingDir = "C:\dev\tri",
   [string]$ApprovalPolicy = 'never',
   [string]$Sandbox = 'danger-full-access',
-  [string]$Model = ''
+  [string]$Model = '',
+  [string]$ResumeThreadId = ''
 )
 
 $Host.UI.RawUI.WindowTitle = $Title
@@ -16,8 +17,11 @@ try {
   if (-not $Model -and $env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
   $args = @('--no-alt-screen', '-a', $ApprovalPolicy, '--sandbox', $Sandbox, '-C', $WorkingDir)
   if ($Model) { $args = @('-m', $Model) + $args }
-  codex @args
+  if ($ResumeThreadId) {
+    codex resume @args $ResumeThreadId
+  } else {
+    codex @args
+  }
 } finally {
   Stop-Transcript | Out-Null
 }
-

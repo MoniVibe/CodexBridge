@@ -25,6 +25,35 @@ function Import-DotEnv {
   }
 }
 
+function Update-EnvFileValue {
+  param([string]$Path, [string]$Key, [string]$Value)
+  if (-not $Path -or -not $Key) { return $false }
+  $lines = @()
+  if (Test-Path -LiteralPath $Path) {
+    try { $lines = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue } catch { $lines = @() }
+  }
+  $updated = $false
+  $out = New-Object System.Collections.Generic.List[string]
+  foreach ($line in $lines) {
+    if ($line -match '^\s*#') { $out.Add($line); continue }
+    if ($line -match "^\s*$([regex]::Escape($Key))\s*=") {
+      $out.Add("$Key=$Value")
+      $updated = $true
+      continue
+    }
+    $out.Add($line)
+  }
+  if (-not $updated) { $out.Add("$Key=$Value") }
+  try {
+    $dir = Split-Path -Parent $Path
+    if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    Set-Content -LiteralPath $Path -Value $out.ToArray()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Try-Read-CodexUserConfig {
   param([string]$Path)
   $model = ''
@@ -78,6 +107,7 @@ function Get-Config {
     CodexConsoleAutoStart = $true
     CodexStartWaitSec = 8
     CodexSendKey = 'enter'
+    CodexConsoleStrictFocus = $false
     ClientTimeoutSec = 300
     CodexDangerous = $true
     CodexModel = ''
@@ -112,6 +142,7 @@ function Get-Config {
   if ($env:CODEX_TRANSCRIPT) { $cfg.CodexTranscript = $env:CODEX_TRANSCRIPT }
   if ($env:CODEX_CONSOLE_SCRIPT) { $cfg.CodexConsoleScript = $env:CODEX_CONSOLE_SCRIPT }
   if ($env:CODEX_CONSOLE_AUTOSTART) { $cfg.CodexConsoleAutoStart = ($env:CODEX_CONSOLE_AUTOSTART -match '^(1|true|yes)$') }
+  if ($env:CODEX_CONSOLE_STRICT_FOCUS) { $cfg.CodexConsoleStrictFocus = ($env:CODEX_CONSOLE_STRICT_FOCUS -match '^(1|true|yes)$') }
   if ($env:CODEX_START_WAIT_SEC) { $cfg.CodexStartWaitSec = [int]$env:CODEX_START_WAIT_SEC }
   if ($env:CODEX_SEND_KEY) { $cfg.CodexSendKey = $env:CODEX_SEND_KEY }
   if ($env:CODEX_WAIT_SEC) { $cfg.CodexWaitSec = [int]$env:CODEX_WAIT_SEC }
@@ -232,7 +263,20 @@ function New-JobId {
 }
 
 function Start-CodexConsole {
-  param($cfg)
+  param($cfg, $state, [string]$ResumeThreadId = '')
+  try {
+    if ($state -and $state.codex_console_pid) {
+      $p = Get-Process -Id ([int]$state.codex_console_pid) -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        if (-not $state.codex_console_pid) { $state.codex_console_pid = $p.Id }
+        return
+      }
+    }
+  } catch {}
+  try {
+    $existing = @(Get-Process | Where-Object { $_.MainWindowTitle -like "*$($cfg.CodexWindowTitle)*" })
+    if ($existing -and $existing.Count -gt 0) { return }
+  } catch {}
   if (-not (Test-Path -LiteralPath $cfg.CodexConsoleScript)) {
     throw "codex_console.ps1 missing at $($cfg.CodexConsoleScript)"
   }
@@ -245,8 +289,94 @@ function Start-CodexConsole {
     '-WorkingDir', $cfg.CodexCwd
   )
   if ($cfg.CodexModel) { $args += @('-Model', $cfg.CodexModel) }
+  if ($ResumeThreadId) { $args += @('-ResumeThreadId', $ResumeThreadId) }
 
-  $null = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd
+  $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $args -WorkingDirectory $cfg.CodexCwd -PassThru
+  if ($state -and $proc) {
+    $state.codex_console_pid = $proc.Id
+    Save-State -cfg $cfg -state $state
+  }
+}
+
+function Stop-CodexConsole {
+  param($cfg, $state)
+  $procs = @()
+  try {
+    $procs = @(Get-Process | Where-Object { $_.MainWindowTitle -like "*$($cfg.CodexWindowTitle)*" })
+  } catch {
+    $procs = @()
+  }
+  if (-not $procs -or $procs.Count -eq 0) { return $false }
+
+  foreach ($p in $procs) {
+    try {
+      if ($p.MainWindowHandle -ne 0) {
+        $null = $p.CloseMainWindow()
+        Start-Sleep -Milliseconds 300
+      }
+    } catch {}
+    try {
+      if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    } catch {}
+  }
+  if ($state) {
+    $state.codex_console_pid = $null
+    Save-State -cfg $cfg -state $state
+  }
+  return $true
+}
+
+function Restart-CodexConsole {
+  param($cfg, $state, [string]$ResumeThreadId = '')
+  $null = Stop-CodexConsole -cfg $cfg -state $state
+  Start-CodexConsole -cfg $cfg -state $state -ResumeThreadId $ResumeThreadId
+  Start-Sleep -Seconds $cfg.CodexStartWaitSec
+  Ensure-StateProperty -state $state -Name 'codex_console_offset' -Value 0
+  $state.codex_console_offset = 0
+  if ($ResumeThreadId) {
+    $state.codex_session_id = $ResumeThreadId
+    $state.codex_has_session = $true
+  } else {
+    $state.codex_session_id = $null
+    $state.codex_has_session = $false
+  }
+  Save-State -cfg $cfg -state $state
+}
+
+function Set-CodexMode {
+  param($cfg, $state, [string]$Mode, [bool]$Persist, [bool]$StartConsole, [string]$ConfigPath)
+  if (-not $Mode) { throw 'mode missing.' }
+  $m = $Mode.ToLowerInvariant()
+  if ($m -ne 'exec' -and $m -ne 'console') { throw "invalid mode: $Mode" }
+
+  $cfg.CodexMode = $m
+  if ($m -eq 'console') {
+    $cfg.CodexConsoleAutoStart = $true
+    if ($StartConsole) { Start-CodexConsole -cfg $cfg -state $state }
+  } else {
+    $cfg.CodexConsoleAutoStart = $false
+  }
+
+  if ($Persist) {
+    $ok1 = Update-EnvFileValue -Path $ConfigPath -Key 'CODEX_MODE' -Value $m
+    $ok2 = Update-EnvFileValue -Path $ConfigPath -Key 'CODEX_CONSOLE_AUTOSTART' -Value ($(if ($cfg.CodexConsoleAutoStart) { '1' } else { '0' }))
+    if (-not ($ok1 -and $ok2)) { throw 'failed to persist CODEX_MODE/CONSOLE_AUTOSTART' }
+  }
+
+  return [ordered]@{ mode = $m; autostart = $cfg.CodexConsoleAutoStart; persisted = $Persist }
+}
+
+function Set-CodexSendKey {
+  param($cfg, [string]$Key, [bool]$Persist, [string]$ConfigPath)
+  if (-not $Key) { throw 'send key missing.' }
+  $k = $Key.ToLowerInvariant().Trim()
+  if ($k -notin @('enter','ctrl+enter','shift+enter')) { throw "invalid send key: $Key" }
+  $cfg.CodexSendKey = $k
+  if ($Persist) {
+    $ok = Update-EnvFileValue -Path $ConfigPath -Key 'CODEX_SEND_KEY' -Value $k
+    if (-not $ok) { throw 'failed to persist CODEX_SEND_KEY' }
+  }
+  return [ordered]@{ send_key = $k; persisted = $Persist }
 }
 
 function Send-CodexConsolePrompt {
@@ -255,21 +385,57 @@ function Send-CodexConsolePrompt {
   Ensure-StateProperty -state $state -Name 'codex_console_offset' -Value 0
 
   Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CodexWin32 {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet=CharSet.Auto, SetLastError=true)]
+  public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+}
+"@
   $shell = New-Object -ComObject WScript.Shell
   $ok = $shell.AppActivate($cfg.CodexWindowTitle)
   if (-not $ok -and $cfg.CodexConsoleAutoStart) {
-    Start-CodexConsole -cfg $cfg
+    Start-CodexConsole -cfg $cfg -state $state
     Start-Sleep -Seconds $cfg.CodexStartWaitSec
     $ok = $shell.AppActivate($cfg.CodexWindowTitle)
   }
   if (-not $ok) { throw "Codex window not found: $($cfg.CodexWindowTitle)" }
+
+  try {
+    $proc = $null
+    if ($state -and $state.codex_console_pid) {
+      $proc = Get-Process -Id ([int]$state.codex_console_pid) -ErrorAction SilentlyContinue
+    }
+    if (-not $proc) {
+      $proc = Get-Process | Where-Object { $_.MainWindowTitle -like "*$($cfg.CodexWindowTitle)*" } | Select-Object -First 1
+    }
+    if ($proc -and $proc.MainWindowHandle -ne 0) {
+      [CodexWin32]::ShowWindowAsync($proc.MainWindowHandle, 9) | Out-Null # SW_RESTORE
+      [CodexWin32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+    }
+  } catch {}
 
   if ($state.codex_console_offset -eq 0 -and (Test-Path -LiteralPath $cfg.CodexTranscript)) {
     $state.codex_console_offset = (Get-Item -LiteralPath $cfg.CodexTranscript).Length
     Save-State -cfg $cfg -state $state
   }
 
-  Start-Sleep -Milliseconds 200
+  Start-Sleep -Milliseconds 400
+
+  # Verify focus before sending keys to avoid typing into the wrong window.
+  try {
+    $h = [CodexWin32]::GetForegroundWindow()
+    $sb = New-Object System.Text.StringBuilder 256
+    [void][CodexWin32]::GetWindowText($h, $sb, $sb.Capacity)
+    $title = $sb.ToString()
+    if ($cfg.CodexConsoleStrictFocus -and (-not $title -or ($title -notlike "*$($cfg.CodexWindowTitle)*"))) {
+      return "Console not focused. Please click the '$($cfg.CodexWindowTitle)' window and retry."
+    }
+  } catch {}
   [System.Windows.Forms.SendKeys]::SendWait($Prompt)
   switch ($cfg.CodexSendKey.ToLowerInvariant()) {
     'ctrl+enter' { [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}") }
@@ -277,17 +443,34 @@ function Send-CodexConsolePrompt {
     default { [System.Windows.Forms.SendKeys]::SendWait("{ENTER}") }
   }
 
-  Start-Sleep -Seconds $cfg.CodexWaitSec
-
   $offset = 0
   if ($state.codex_console_offset) { $offset = [long]$state.codex_console_offset }
-  $delta = Read-LogDelta -Path $cfg.CodexTranscript -Offset $offset
-  $state.codex_console_offset = $delta.newOffset
+
+  $maxWait = [Math]::Max(1, [int]$cfg.CodexWaitSec)
+  $elapsed = 0
+  $agg = ''
+  $clean = ''
+  while ($elapsed -lt $maxWait) {
+    Start-Sleep -Seconds 1
+    $elapsed++
+    $delta = Read-LogDelta -Path $cfg.CodexTranscript -Offset $offset
+    $offset = $delta.newOffset
+    if ($delta.text) {
+      $agg += $delta.text
+      $clean = Clean-TranscriptText -Text $agg
+      if ($clean) {
+        $clean = Strip-PromptEcho -Text $clean -Prompt $Prompt
+        if ($clean) { break }
+      }
+    }
+  }
+
+  $state.codex_console_offset = $offset
   Save-State -cfg $cfg -state $state
 
-  if (-not $delta.text) { return '(no output yet)' }
-  $clean = Clean-TranscriptText -Text $delta.text
+  if (-not $agg) { return '(no output yet)' }
   if (-not $clean) { return '(sent; no output yet)' }
+  $clean = Dedup-ConsecutiveLines -Text $clean
   return $clean
 }
 
@@ -321,6 +504,71 @@ function Clean-TranscriptText {
   return ($clean -join "`n")
 }
 
+function Strip-PromptEcho {
+  param([string]$Text, [string]$Prompt)
+  if (-not $Text) { return '' }
+  if (-not $Prompt) { return $Text }
+  $p = $Prompt.Trim()
+  if (-not $p) { return $Text }
+  $normalize = {
+    param([string]$s)
+    if (-not $s) { return '' }
+    $t = $s.Trim()
+    # Strip ANSI escape sequences and control chars.
+    $t = $t -replace "`e\\[[0-9;]*[A-Za-z]", ''
+    $t = $t -replace "`e\\][^`e]*(`e\\\\)?", ''
+    $t = $t -replace "[`0-`9`11`12`14-`31]", ''
+    $t = $t -replace '^[>\-•›»\s]+', ''
+    $t = $t -replace '[^a-zA-Z0-9]+', ' '
+    $t = $t -replace '\s+', ' '
+    return $t.Trim().ToLowerInvariant()
+  }
+  $pNorm = & $normalize $p
+  $targets = @($p, "> $p", "› $p", ">> $p", "» $p", "• $p")
+  $lines = $Text -split "`r?`n"
+  $out = New-Object System.Collections.Generic.List[string]
+  foreach ($line in $lines) {
+    $trim = $line.Trim()
+    if (-not $trim) { $out.Add($line); continue }
+    $isPrompt = $false
+    foreach ($t in $targets) {
+      if ($trim -eq $t) { $isPrompt = $true; break }
+    }
+    if (-not $isPrompt) {
+      $tNorm = & $normalize $trim
+      if ($tNorm.Length -ge 8 -and ($pNorm.Contains($tNorm) -or $tNorm.Contains($pNorm))) { $isPrompt = $true }
+    }
+    if ($isPrompt) { continue }
+    $out.Add($line)
+  }
+  return ($out -join "`n")
+}
+
+function Dedup-ConsecutiveLines {
+  param([string]$Text)
+  if (-not $Text) { return $Text }
+  $normalize = {
+    param([string]$s)
+    if (-not $s) { return '' }
+    $t = $s.Trim()
+    $t = $t -replace "`e\\[[0-9;]*[A-Za-z]", ''
+    $t = $t -replace "`e\\][^`e]*(`e\\\\)?", ''
+    $t = $t -replace "[`0-`9`11`12`14-`31]", ''
+    $t = $t -replace '\s+', ' '
+    return $t.Trim().ToLowerInvariant()
+  }
+  $lines = $Text -split "`r?`n"
+  $out = New-Object System.Collections.Generic.List[string]
+  $prev = $null
+  foreach ($line in $lines) {
+    $norm = & $normalize $line
+    if ($prev -ne $null -and $norm -and $norm -eq $prev) { continue }
+    $out.Add($line)
+    $prev = $norm
+  }
+  return ($out -join "`n")
+}
+
 function Append-SessionInfo {
   param($cfg, $state, [string]$Text)
   if (-not $cfg.CodexAppendSession) { return $Text }
@@ -349,6 +597,65 @@ function Append-SessionInfo {
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
 
+function Normalize-Path {
+  param([string]$Path)
+  if (-not $Path) { return '' }
+  $p = $Path.Trim()
+  $p = $p.TrimEnd('\', '/')
+  return $p.ToLowerInvariant()
+}
+
+function Try-Read-SessionMeta {
+  param([string]$Path)
+  if (-not $Path) { return $null }
+  try {
+    $line = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction Stop
+    if (-not $line) { return $null }
+    $obj = $line | ConvertFrom-Json -ErrorAction Stop
+    if (-not $obj -or $obj.type -ne 'session_meta') { return $null }
+    return $obj.payload
+  } catch {
+    return $null
+  }
+}
+
+function Find-RecentCodexSessionId {
+  param([datetime]$Since, [string]$WorkDir)
+  $root = Join-Path $env:USERPROFILE '.codex\\sessions'
+  if (-not (Test-Path -LiteralPath $root)) { return $null }
+  $since = $Since
+  if (-not $since) { $since = (Get-Date).AddMinutes(-10) }
+  $sinceFloor = $since.AddMinutes(-2)
+  $dates = @($since.Date, $since.Date.AddDays(-1), $since.Date.AddDays(1)) | Select-Object -Unique
+  $candidates = @()
+  foreach ($d in $dates) {
+    $dir = Join-Path $root ($d.ToString('yyyy'))
+    $dir = Join-Path $dir ($d.ToString('MM'))
+    $dir = Join-Path $dir ($d.ToString('dd'))
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $items = Get-ChildItem -LiteralPath $dir -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -ge $sinceFloor }
+    if ($items) { $candidates += $items }
+  }
+  if (-not $candidates) { return $null }
+  $workNorm = Normalize-Path -Path $WorkDir
+  $sorted = $candidates | Sort-Object LastWriteTime -Descending
+  foreach ($f in $sorted) {
+    $meta = Try-Read-SessionMeta -Path $f.FullName
+    if (-not $meta -or -not $meta.id) { continue }
+    if ($meta.source -and $meta.source -ne 'exec') { continue }
+    if ($workNorm -and $meta.cwd) {
+      if ((Normalize-Path -Path $meta.cwd) -ne $workNorm) { continue }
+    }
+    return [string]$meta.id
+  }
+  foreach ($f in $sorted) {
+    $meta = Try-Read-SessionMeta -Path $f.FullName
+    if ($meta -and $meta.id) { return [string]$meta.id }
+  }
+  return $null
+}
+
 function Get-LogTail {
   param([string]$LogPath, [int]$Lines)
   if (-not (Test-Path -LiteralPath $LogPath)) { return '(log missing)' }
@@ -366,6 +673,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_last_log' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_session_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
+      Ensure-StateProperty -state $obj -Name 'codex_console_pid' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
@@ -388,6 +696,7 @@ function Load-State {
     codex_last_log = $null
     codex_session_id = $null
     codex_console_offset = 0
+    codex_console_pid = $null
     codex_cwd = $null
     codex_model = $null
     codex_reasoning_effort = $null
@@ -483,6 +792,7 @@ function Invoke-CodexExec {
   param($cfg, $state, [string]$Prompt, [bool]$Resume)
 
   $jobId = New-JobId
+  $startTime = Get-Date
   $outFile = Join-Path $cfg.LogDir "codex_exec_${jobId}.out"
   $logPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
   $stdoutPath = Join-Path $cfg.LogDir "codex_exec_${jobId}.stdout.log"
@@ -560,9 +870,18 @@ function Invoke-CodexExec {
   $sessionText = ''
   if ($stdoutText) { $sessionText += $stdoutText }
   if ($stderrText) { $sessionText += $stderrText }
-  if ($sessionText -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
+  $capturedThread = $false
+  if ($sessionText -match '"thread_id"\s*:\s*"([0-9a-f-]{16,})"') {
     $state.codex_session_id = $Matches[1]
     $state.codex_has_session = $true
+    $capturedThread = $true
+  }
+  if (-not $capturedThread -and -not $Resume) {
+    $fallbackId = Find-RecentCodexSessionId -Since $startTime -WorkDir $workDir
+    if ($fallbackId) {
+      $state.codex_session_id = $fallbackId
+      $state.codex_has_session = $true
+    }
   }
   $state.codex_cwd = $workDir
   $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
@@ -629,6 +948,7 @@ function Get-CodexJobInfo {
     started = $state.codex_job_started
     exit_code = $exitCode
     thread_id = if ($res -and $res.thread_id) { $res.thread_id } else { $null }
+    resume_thread_id = if ($res -and $res.resume_thread_id) { $res.resume_thread_id } else { $null }
     error = if ($res -and -not $res.ok) { $res.error } else { $null }
     out_file = $state.codex_job_outfile
     stdout_file = $state.codex_job_stdout
@@ -652,6 +972,28 @@ function Refresh-CodexJobState {
   if ($threadId -and ($state.codex_session_id -ne $threadId)) {
     $state.codex_session_id = $threadId
     $state.codex_has_session = $true
+  }
+  if (-not $threadId) {
+    $resumeThread = $null
+    if ($info.PSObject.Properties.Name -contains 'resume_thread_id') { $resumeThread = $info.resume_thread_id }
+    if ($resumeThread) {
+      if ($state.codex_session_id -ne $resumeThread) { $state.codex_session_id = $resumeThread }
+      $state.codex_has_session = $true
+    } else {
+      $since = $null
+      if ($state.codex_job_started) {
+        try { $since = [datetime]$state.codex_job_started } catch {}
+      }
+      if (-not $since -and $info.started) {
+        try { $since = [datetime]$info.started } catch {}
+      }
+      if (-not $since) { $since = Get-Date }
+      $fallbackId = Find-RecentCodexSessionId -Since $since -WorkDir $state.codex_cwd
+      if ($fallbackId) {
+        $state.codex_session_id = $fallbackId
+        $state.codex_has_session = $true
+      }
+    }
   }
 
   $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
@@ -973,16 +1315,68 @@ while ($true) {
           $resp = @{ ok = $true; result = $out }
         }
       }
-      'codex.new' {
-        if ($cfg.CodexMode -eq 'console') { throw 'codexnew not supported in console mode.' }
+      'codex.exec' {
         if (-not $req.prompt) { throw 'prompt missing.' }
         $null = Refresh-CodexJobState -cfg $cfg -state $state
+        $resume = $false
+        if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $resume = $true }
         if ($cfg.CodexAsync) {
-          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
         } else {
-          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$resume
         }
         $resp = @{ ok = $true; result = $out }
+      }
+      'codex.exec.last' {
+        $job = Refresh-CodexJobState -cfg $cfg -state $state
+        if ($job -and $job.running) {
+          $tailLines = $cfg.CodexJobTailLines
+          if ($req.lines) { $tailLines = [int]$req.lines }
+          $parts = New-Object System.Collections.Generic.List[string]
+          $parts.Add(("Codex job running: id={0} pid={1} started={2}" -f $job.id, $job.pid, $job.started))
+          if ($job.stdout_file -and (Test-Path -LiteralPath $job.stdout_file)) {
+            $parts.Add('')
+            $parts.Add('--- stdout (tail) ---')
+            $parts.Add((Get-LogTail -LogPath $job.stdout_file -Lines $tailLines))
+          }
+          if ($job.stderr_file -and (Test-Path -LiteralPath $job.stderr_file)) {
+            $parts.Add('')
+            $parts.Add('--- stderr (tail) ---')
+            $parts.Add((Get-LogTail -LogPath $job.stderr_file -Lines $tailLines))
+          }
+          $resp = @{ ok = $true; result = @{ session = 'default'; output = ($parts -join "`n") } }
+          break
+        }
+
+        $outFile = $null
+        if ($state.PSObject.Properties.Name -contains 'codex_job_outfile') { $outFile = $state.codex_job_outfile }
+        if ($outFile -and (Test-Path -LiteralPath $outFile)) {
+          $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
+          if (-not $output) { $output = '(no output)' }
+          $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
+          $resp = @{ ok = $true; result = @{ session = 'default'; output = $output } }
+        } else {
+          $resp = @{ ok = $false; error = 'No exec output found.' }
+        }
+      }
+      'codex.new' {
+        if ($cfg.CodexMode -eq 'console') {
+          Restart-CodexConsole -cfg $cfg -state $state
+          $msg = 'Console restarted with a fresh session. Use codex <prompt> to send a message, or codexresume <session_id> to resume.'
+          if ($req.prompt) { $msg += ' Note: codexnew in console mode does not auto-send prompts.' }
+          $resp = @{ ok = $true; result = @{ output = $msg } }
+        } else {
+          if (-not $req.prompt) { throw 'prompt missing.' }
+          $state.codex_session_id = $null
+          $state.codex_has_session = $false
+          $null = Refresh-CodexJobState -cfg $cfg -state $state
+          if ($cfg.CodexAsync) {
+            $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          } else {
+            $out = Invoke-CodexExec -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
+          }
+          $resp = @{ ok = $true; result = $out }
+        }
       }
       'codex.start' {
         $state.codex_has_session = $true
@@ -1050,14 +1444,51 @@ while ($true) {
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ model = $state.codex_model; reset = $doReset } }
       }
+      'codex.mode' {
+        if (-not $req.mode) {
+          $resp = @{ ok = $true; result = @{ mode = $cfg.CodexMode; autostart = $cfg.CodexConsoleAutoStart } }
+        } else {
+          $persist = $true
+          if ($req.persist -ne $null) { $persist = ([string]$req.persist -match '^(1|true|yes)$') }
+          $startConsole = $true
+          if ($req.start_console -ne $null) { $startConsole = ([string]$req.start_console -match '^(1|true|yes)$') }
+          $res = Set-CodexMode -cfg $cfg -state $state -Mode ([string]$req.mode) -Persist:$persist -StartConsole:$startConsole -ConfigPath $ConfigPath
+          $resp = @{ ok = $true; result = $res }
+        }
+      }
+      'codex.sendkey' {
+        if (-not $req.key) {
+          $resp = @{ ok = $true; result = @{ send_key = $cfg.CodexSendKey } }
+        } else {
+          $persist = $true
+          if ($req.persist -ne $null) { $persist = ([string]$req.persist -match '^(1|true|yes)$') }
+          $res = Set-CodexSendKey -cfg $cfg -Key ([string]$req.key) -Persist:$persist -ConfigPath $ConfigPath
+          $resp = @{ ok = $true; result = $res }
+        }
+      }
       'codex.use' {
         if (-not $req.session) { throw 'session missing.' }
-        $job = Get-CodexJobInfo -cfg $cfg -state $state
-        if ($job -and $job.running) { throw "Codex job running (job_id=$($job.id)). Cancel it first." }
-        $state.codex_session_id = $req.session
-        $state.codex_has_session = $true
-        Save-State -cfg $cfg -state $state
-        $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
+        if ($cfg.CodexMode -eq 'console') {
+          Restart-CodexConsole -cfg $cfg -state $state -ResumeThreadId $req.session
+          $resp = @{ ok = $true; result = @{ session = $req.session; output = "Console restarted and resumed session $($req.session)." } }
+        } else {
+          $job = Get-CodexJobInfo -cfg $cfg -state $state
+          if ($job -and $job.running) { throw "Codex job running (job_id=$($job.id)). Cancel it first." }
+          $state.codex_session_id = $req.session
+          $state.codex_has_session = $true
+          # Clear any completed job metadata so a stale job can't overwrite the new session.
+          $state.codex_job_id = $null
+          $state.codex_job_pid = $null
+          $state.codex_job_prompt = $null
+          $state.codex_job_outfile = $null
+          $state.codex_job_stdout = $null
+          $state.codex_job_stderr = $null
+          $state.codex_job_result = $null
+          $state.codex_job_exit = $null
+          $state.codex_job_started = $null
+          Save-State -cfg $cfg -state $state
+          $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
+        }
       }
       'codex.reset' {
         $null = Cancel-CodexJob -cfg $cfg -state $state
