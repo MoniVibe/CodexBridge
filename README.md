@@ -37,7 +37,7 @@ pwsh -NoProfile -File .\broker.ps1
 Target prefix is optional:
 - `[<target>] codex <prompt>`: send prompt to the active Codex thread
 - `[<target>] codexnew [prompt]`: fresh thread for this prompt (no resume). In console mode, omitting the prompt just restarts the console window.
-- `[<target>] codexfresh <prompt>`: reset thread then run prompt
+- `[<target>] codexfresh [prompt]`: start a fresh exec session (never console). Cancels any running exec job first. If a prompt is provided, it runs it.
 - `[<target>] codexexec [new] [prompt]`: switch to exec mode. With `new`, clears the exec session (optionally sends a prompt).
 - `[<target>] codexconsole [new] [prompt]`: switch to console mode. With `new`, restarts the console (optionally sends a prompt).
 - `[<target>] codexlast [lines]`: tail the last Codex output

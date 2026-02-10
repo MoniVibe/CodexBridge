@@ -428,10 +428,10 @@ function Is-KnownCommandOrTarget {
   if (-not $token) { return $false }
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
-    'help','status','run','last','tail','get','codex','codexnew','codexfresh','agent',
+    'help','status','run','last','tail','get','codex','codexnew','codexfresh','codexfreshconsole','agent',
     'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexresume','codexreset','codexstart','codexstop','codexlist','codexlast',
     'codexexec','codexexecnew','codexforceexec','codexforceexecnew','codexconsole','codexconsolenew','codexconsoleexec','codexconsoleexecnew',
-    'cancel','job','model','session'
+    'cancel','job','model','session','console'
   )
   return $known -contains $token
 }
@@ -530,6 +530,7 @@ function Handle-Command {
     'model'   = 'codexmodel'
     'session' = 'codexsession'
     'agent'   = 'codex'
+    'console' = 'codexconsole'
   }
   if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
 
@@ -554,7 +555,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh <prompt> | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] | codexconsoleexec [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -640,11 +641,8 @@ function Handle-Command {
         }
       }
 
-      # Allow "codex console ..." and "codex exec ..." shorthands.
-      if ($subCmd -eq 'console') {
-        $cmd = 'codexconsole'
-        $rest = $subRest
-      } elseif ($subCmd -eq 'exec') {
+      # Allow "codex exec ..." shorthand.
+      if ($subCmd -eq 'exec') {
         $cmd = 'codexexec'
         $rest = $subRest
       }
@@ -660,7 +658,7 @@ function Handle-Command {
         return
       }
 
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send'; prompt = $rest; session = 'default'; auto_start = $true }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $rest; session = 'default'; auto_start = $true }
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
@@ -680,7 +678,7 @@ function Handle-Command {
       return
     }
     'codexnew' {
-      $payload = @{ op = 'codex.new' }
+      $payload = @{ op = 'codex.new.exec' }
       if ($rest) { $payload.prompt = $rest }
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
       if ($resp.ok) {
@@ -691,7 +689,7 @@ function Handle-Command {
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId (new thread). I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
@@ -727,7 +725,7 @@ function Handle-Command {
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (exec). I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
@@ -781,7 +779,7 @@ function Handle-Command {
 
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $consoleTarget -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (console). I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex console job $jobId. I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
@@ -835,7 +833,7 @@ function Handle-Command {
 
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $consoleTarget -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (console). I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex console job $jobId. I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
@@ -866,8 +864,13 @@ function Handle-Command {
       return
     }
     'codexfresh' {
-      if (-not $rest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codexfresh <prompt>'; return }
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new'; prompt = $rest }
+      # Always start a fresh exec session (never console). Optional prompt.
+      try { $null = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.cancel' } } catch {}
+      $modeResp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' }
+      if (-not $modeResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $modeResp); return }
+      $payload = @{ op = 'codex.new.exec' }
+      if ($rest) { $payload.prompt = $rest }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
       if ($resp.ok) {
         $out = $resp.result.output
         $jobId = $null
@@ -876,14 +879,19 @@ function Handle-Command {
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId (new thread). I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId (fresh). I'll reply here when it's done.")
         } else {
-          if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
+          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
         }
       } else {
         Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       }
+      return
+    }
+    'codexfreshconsole' {
+      # Always start a fresh console session. Optional prompt.
+      Handle-Command -cfg $cfg -state $state -ChatId $ChatId -Text ("$target codexconsole new $rest".Trim())
       return
     }
     'codexstart' {
