@@ -745,6 +745,8 @@ function Invoke-CodexExec {
   $workDir = $cfg.DefaultCwd
   if ($cfg.CodexCwd -and (Test-Path -LiteralPath $cfg.CodexCwd)) { $workDir = $cfg.CodexCwd }
 
+  $startedAt = Get-Date
+
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cfg.PwshPath
   $psi.Arguments = $argString
@@ -789,6 +791,13 @@ function Invoke-CodexExec {
   if ($sessionText -match '\"thread_id\":\"([0-9a-f-]{16,})\"') {
     $state.codex_session_id = $Matches[1]
     $state.codex_has_session = $true
+  } elseif (-not $Resume) {
+    # Best-effort: map this exec to the created rollout file and capture the new session id.
+    $sid = Resolve-CodexSessionFromRollout -StartTime $startedAt -EndTime (Get-Date)
+    if ($sid) {
+      $state.codex_session_id = $sid
+      $state.codex_has_session = $true
+    }
   }
   $state.codex_cwd = $workDir
   $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
@@ -859,12 +868,34 @@ function Resolve-CodexSessionFromRollout {
 
     $windowStart = if ($StartTime) { $StartTime.AddMinutes(-2) } else { (Get-Date).AddMinutes(-5) }
     $windowEnd = if ($EndTime) { $EndTime.AddMinutes(2) } else { (Get-Date).AddMinutes(1) }
+
+    # Prefer parsing the timestamp embedded in the filename (more accurate than LastWriteTime).
+    $parsed = @()
+    foreach ($f in $candidates) {
+      if ($f.Name -match '^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-([0-9a-f-]{16,})\.jsonl$') {
+        try {
+          $dt = [datetime]::new([int]$Matches[1],[int]$Matches[2],[int]$Matches[3],[int]$Matches[4],[int]$Matches[5],[int]$Matches[6])
+          $parsed += [pscustomobject]@{ file = $f; dt = $dt; thread_id = $Matches[7] }
+        } catch {}
+      }
+    }
+    if ($parsed.Count -gt 0) {
+      $inWindow = @($parsed | Where-Object { $_.dt -ge $windowStart -and $_.dt -le $windowEnd })
+      if ($inWindow.Count -eq 0) { $inWindow = $parsed }
+      if ($StartTime) {
+        $pick = $inWindow | Sort-Object @{ Expression = { [Math]::Abs(($_.dt - $StartTime).TotalSeconds) } }, @{ Expression = { $_.dt }; Descending = $true } | Select-Object -First 1
+        if ($pick -and $pick.thread_id) { return $pick.thread_id }
+      } else {
+        $pick = $inWindow | Sort-Object dt -Descending | Select-Object -First 1
+        if ($pick -and $pick.thread_id) { return $pick.thread_id }
+      }
+    }
+
+    # Fallback to file timestamps.
     $pick = $candidates | Where-Object { $_.LastWriteTime -ge $windowStart -and $_.LastWriteTime -le $windowEnd } |
       Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $pick) { $pick = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
-    if ($pick -and $pick.Name -match 'rollout-.*-([0-9a-f-]{16,})\\.jsonl$') {
-      return $Matches[1]
-    }
+    if ($pick -and $pick.Name -match 'rollout-.*-([0-9a-f-]{16,})\\.jsonl$') { return $Matches[1] }
   } catch {}
   return $null
 }
@@ -1043,10 +1074,29 @@ function Start-CodexExecJob {
   $state.codex_cwd = $workDir
   Save-State -cfg $cfg -state $state
 
+  # If we're starting a fresh exec thread, try to resolve the new session id immediately.
+  # rollout-*.jsonl files are created at the start of the run.
+  $resolvedSid = $null
+  if (-not $Resume) {
+    $jobStart = $null
+    try { $jobStart = [DateTime]::Parse($state.codex_job_started) } catch { $jobStart = Get-Date }
+    for ($i = 0; $i -lt 10; $i++) {
+      $resolvedSid = Resolve-CodexSessionFromRollout -StartTime $jobStart -EndTime (Get-Date)
+      if ($resolvedSid) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    if ($resolvedSid -and ($state.codex_session_id -ne $resolvedSid)) {
+      $state.codex_session_id = $resolvedSid
+      $state.codex_has_session = $true
+      Save-State -cfg $cfg -state $state
+    }
+  }
+
   $modelLabel = if ($model) { $model } else { 'default' }
   $reasoningLabel = if ($reasoning) { $reasoning } else { 'default' }
   $resumeLabel = if ($resumeThread) { "resume $resumeThread" } else { 'new thread' }
-  $msg = "Queued codex job $jobId ($resumeLabel, model=$modelLabel, reasoning=$reasoningLabel). Use 'codexlast' to check output."
+  $sidLabel = if ($resolvedSid) { " thread_id=$resolvedSid" } else { '' }
+  $msg = "Queued codex job $jobId ($resumeLabel, model=$modelLabel, reasoning=$reasoningLabel).$sidLabel Use 'codexlast' to check output."
 
   return @{ output = $msg; job_id = $jobId; pid = $proc.Id }
 }
