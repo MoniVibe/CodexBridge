@@ -1263,6 +1263,10 @@ while ($true) {
             break
           }
           $null = Refresh-CodexJobState -cfg $cfg -state $state
+          # Fresh exec thread: clear any stale session id before launching.
+          $state.codex_session_id = $null
+          $state.codex_has_session = $false
+          Save-State -cfg $cfg -state $state
           if ($cfg.CodexAsync) {
             $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
           } else {
@@ -1280,6 +1284,10 @@ while ($true) {
           break
         }
         $null = Refresh-CodexJobState -cfg $cfg -state $state
+        # Fresh exec thread: clear any stale session id before launching.
+        $state.codex_session_id = $null
+        $state.codex_has_session = $false
+        Save-State -cfg $cfg -state $state
         if ($cfg.CodexAsync) {
           $out = Start-CodexExecJob -cfg $cfg -state $state -Prompt $req.prompt -Resume:$false
         } else {
