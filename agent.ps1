@@ -541,23 +541,31 @@ function Append-SessionInfo {
     }
   }
   if (-not $sid) { return $Text }
+
+  # Prefer the most recent run metadata, then fall back to config/state defaults.
   $model = $null
-  if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
+  if ($state.PSObject.Properties.Name -contains 'codex_last_model' -and $state.codex_last_model) { $model = $state.codex_last_model }
+  elseif ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
   elseif ($cfg.CodexModel) { $model = $cfg.CodexModel }
   elseif ($cfg.CodexUserConfigModel) { $model = $cfg.CodexUserConfigModel }
   if (-not $model) { $model = 'default' }
 
   $reasoning = $null
-  if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $reasoning = $state.codex_reasoning_effort }
+  if ($state.PSObject.Properties.Name -contains 'codex_last_reasoning_effort' -and $state.codex_last_reasoning_effort) { $reasoning = $state.codex_last_reasoning_effort }
+  elseif ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $reasoning = $state.codex_reasoning_effort }
   elseif ($cfg.CodexReasoningEffort) { $reasoning = $cfg.CodexReasoningEffort }
   elseif ($cfg.CodexUserConfigReasoningEffort) { $reasoning = $cfg.CodexUserConfigReasoningEffort }
   if (-not $reasoning) { $reasoning = 'default' }
 
   $cwd = $null
-  if ($state.PSObject.Properties.Name -contains 'codex_cwd') { $cwd = $state.codex_cwd }
+  if ($state.PSObject.Properties.Name -contains 'codex_last_cwd' -and $state.codex_last_cwd) { $cwd = $state.codex_last_cwd }
+  elseif ($state.PSObject.Properties.Name -contains 'codex_cwd' -and $state.codex_cwd) { $cwd = $state.codex_cwd }
   if (-not $cwd) { $cwd = $cfg.CodexCwd }
   if (-not $cwd) { $cwd = $cfg.DefaultCwd }
-  $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
+
+  $perms = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_last_perms' -and $state.codex_last_perms) { $perms = $state.codex_last_perms }
+  if (-not $perms) { $perms = (if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }) }
   $agentName = $cfg.Name
   $machineName = $env:COMPUTERNAME
   $agentLabel = if ($agentName -and $machineName -and ($agentName -ne $machineName)) { "$agentName@$machineName" }
@@ -590,6 +598,10 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_last_model' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_last_reasoning_effort' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_last_perms' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_last_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_mode_override' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_pid' -Value $null
@@ -615,6 +627,10 @@ function Load-State {
     codex_cwd = $null
     codex_model = $null
     codex_reasoning_effort = $null
+    codex_last_model = $null
+    codex_last_reasoning_effort = $null
+    codex_last_perms = $null
+    codex_last_cwd = $null
     codex_mode_override = $null
     codex_job_id = $null
     codex_job_pid = $null
@@ -799,6 +815,12 @@ function Invoke-CodexExec {
       $state.codex_has_session = $true
     }
   }
+
+  # Record run metadata so the appended suffix reflects what actually ran.
+  $state.codex_last_model = if ($model) { $model } elseif ($cfg.CodexUserConfigModel) { $cfg.CodexUserConfigModel } else { 'default' }
+  $state.codex_last_reasoning_effort = if ($reasoning) { $reasoning } elseif ($cfg.CodexUserConfigReasoningEffort) { $cfg.CodexUserConfigReasoningEffort } else { 'default' }
+  $state.codex_last_perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }
+  $state.codex_last_cwd = $workDir
   $state.codex_cwd = $workDir
   $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
   Set-Content -LiteralPath $logPath -Value $output
@@ -991,6 +1013,19 @@ function Refresh-CodexJobState {
       if (-not $since) { $since = Get-Date }
       # Keep current session; do not attempt a filesystem fallback here.
     }
+  }
+
+  # Promote run metadata from the result json when available, so the appended suffix is accurate.
+  if ($state.PSObject.Properties.Name -contains 'codex_job_result' -and $state.codex_job_result -and (Test-Path -LiteralPath $state.codex_job_result)) {
+    try {
+      $res = Get-Content -LiteralPath $state.codex_job_result -Raw | ConvertFrom-Json
+      if ($res) {
+        if ($res.model) { $state.codex_last_model = [string]$res.model }
+        if ($res.reasoning_effort) { $state.codex_last_reasoning_effort = [string]$res.reasoning_effort }
+        if ($res.working_dir) { $state.codex_last_cwd = [string]$res.working_dir }
+        if ($res.dangerous -ne $null) { $state.codex_last_perms = (if ([bool]$res.dangerous) { 'full' } else { 'restricted' }) }
+      }
+    } catch {}
   }
 
   $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
