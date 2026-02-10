@@ -69,7 +69,12 @@ while ($true) {
     }
   }
   if (((Get-Date) - $lastStart.agent_console).TotalSeconds -ge 60) {
-    if (Ensure-Process -Label 'agent_console' -ScriptPath $agentScript -Args @('-NoProfile','-File', $agentScript, '-ConfigPath', $consoleEnv) -ConfigPath $consoleEnv) {
+    if (Test-Path -LiteralPath $consoleEnv) {
+      if (Ensure-Process -Label 'agent_console' -ScriptPath $agentScript -Args @('-NoProfile','-File', $agentScript, '-ConfigPath', $consoleEnv) -ConfigPath $consoleEnv) {
+        $lastStart.agent_console = Get-Date
+      }
+    } else {
+      # No console config present; don't spam restarts.
       $lastStart.agent_console = Get-Date
     }
   }

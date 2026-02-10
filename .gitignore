@@ -3,10 +3,12 @@
 logs/
 telebot_bundle.zip
 agent_state.json
+agent_state_console.json
 state.json
 jobs.json
 broker.env
 agent.env
+agent_console.env
 config.env
 secret.env
 
