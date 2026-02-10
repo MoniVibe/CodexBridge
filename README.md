@@ -19,6 +19,9 @@ Router mode (one broker dispatching to multiple agents) is still supported via `
 - Copy `agent.env.example` -> `agent.env`
 - Copy `broker.env.example` -> `broker.env`
 
+Optional (console instance):
+- Copy `agent_console.env.example` -> `agent_console.env`
+
 2. Ensure `AGENT_SECRET` matches in both files.
 
 3. Start the agent (leave running):
@@ -35,11 +38,13 @@ pwsh -NoProfile -File .\broker.ps1
 
 ## Telegram Commands
 Target prefix is optional:
-- `[<target>] codex <prompt>`: send prompt to the active Codex thread
-- `[<target>] codexnew [prompt]`: fresh thread for this prompt (no resume). In console mode, omitting the prompt just restarts the console window.
+- `[<target>] codex <prompt>`: send prompt to the exec thread (default)
+- `[<target>] codexnew [prompt]`: fresh exec thread (no resume). With no prompt, resets the exec session.
 - `[<target>] codexfresh [prompt]`: start a fresh exec session (never console). Cancels any running exec job first. If a prompt is provided, it runs it.
 - `[<target>] codexexec [new] [prompt]`: switch to exec mode. With `new`, clears the exec session (optionally sends a prompt).
+- `[<target>] codexfreshconsole [prompt]`: start a fresh console session (always console).
 - `[<target>] codexconsole [new] [prompt]`: switch to console mode. With `new`, restarts the console (optionally sends a prompt).
+- `[<target>] console [new] [prompt]`: alias for `codexconsole`.
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
@@ -71,9 +76,9 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
-  - In console mode, `codexnew <prompt>` restarts the console window first, then sends the prompt (fresh session).
-  - `codexnew` with no prompt just restarts the console (useful for resuming manually).
-  - `CODEX_NEW_DELAY_SEC` (default 0): extra delay (seconds) after restarting console on `codexnew` before sending the prompt.
+  - Use `codexconsole new <prompt>` or `codexfreshconsole <prompt>` to restart the console and send a fresh prompt.
+  - `codexconsole` with no prompt just restarts the console (useful for resuming manually).
+  - `CODEX_NEW_DELAY_SEC` (default 0): extra delay (seconds) after restarting console on `codexconsole new` before sending the prompt.
   - Codex console typically submits on `Ctrl+Enter`. If you see prompts only add a newline, set `CODEX_SEND_KEY=ctrl+enter`.
   - If your console submits on Enter, set `CODEX_SEND_KEY=enter`.
 - Logs live in `logs/` on each agent.

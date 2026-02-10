@@ -149,6 +149,47 @@ try {
 
 $ended = (Get-Date).ToString('o')
 
+# Fallback: derive session id from local Codex session files if stdout/stderr didn't include it.
+if (-not $threadId) {
+  try {
+    # Avoid $HOME (automatic variable, case-insensitive) by using a different name.
+    $homeDir = $env:USERPROFILE
+    if (-not $homeDir -and $env:HOMEDRIVE -and $env:HOMEPATH) { $homeDir = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
+    if (-not $homeDir) { $homeDir = $env:HOME }
+    if (-not $homeDir -and $env:USERNAME) { $homeDir = Join-Path 'C:\\Users' $env:USERNAME }
+    if ($homeDir) {
+      $sessionRoot = Join-Path $homeDir '.codex\\sessions'
+      if (Test-Path -LiteralPath $sessionRoot) {
+        $startTime = [DateTime]::Parse($started)
+        $endTime = [DateTime]::Parse($ended)
+        $dateDirs = @($startTime.Date, $endTime.Date) | Select-Object -Unique
+        $candidates = @()
+        foreach ($dt in $dateDirs) {
+          $dir = Join-Path $sessionRoot ($dt.ToString('yyyy\\MM\\dd'))
+          if (Test-Path -LiteralPath $dir) {
+            $files = Get-ChildItem -LiteralPath $dir -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue
+            if ($files) { $candidates += $files }
+          }
+        }
+        if ($candidates.Count -eq 0) {
+          $candidates = Get-ChildItem -LiteralPath $sessionRoot -Recurse -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 10
+        }
+        if ($candidates.Count -gt 0) {
+          $windowStart = $startTime.AddMinutes(-2)
+          $windowEnd = $endTime.AddMinutes(2)
+          $pick = $candidates | Where-Object { $_.LastWriteTime -ge $windowStart -and $_.LastWriteTime -le $windowEnd } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $pick) { $pick = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
+          if ($pick -and $pick.Name -match 'rollout-.*-([0-9a-f-]{16,})\\.jsonl$') {
+            $threadId = $Matches[1]
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
 $result = [ordered]@{
   ok = ($err -eq $null)
   error = $err

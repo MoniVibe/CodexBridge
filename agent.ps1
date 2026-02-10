@@ -530,6 +530,16 @@ function Append-SessionInfo {
   if (-not $cfg.CodexAppendSession) { return $Text }
   $sid = $null
   if ($state.PSObject.Properties.Name -contains 'codex_session_id') { $sid = $state.codex_session_id }
+  if (-not $sid) {
+    $startTime = $null
+    try { if ($state.codex_job_started) { $startTime = [DateTime]::Parse($state.codex_job_started) } } catch {}
+    $sid = Resolve-CodexSessionFromRollout -StartTime $startTime -EndTime (Get-Date)
+    if ($sid) {
+      $state.codex_session_id = $sid
+      $state.codex_has_session = $true
+      Save-State -cfg $cfg -state $state
+    }
+  }
   if (-not $sid) { return $Text }
   $model = $null
   if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $model = $state.codex_model }
@@ -815,6 +825,50 @@ function Get-EffectiveCodexMode {
   return $mode.ToLowerInvariant()
 }
 
+function Resolve-CodexSessionFromRollout {
+  param([datetime]$StartTime, [datetime]$EndTime)
+  try {
+    # Avoid $HOME (automatic variable, case-insensitive) by using a different name.
+    $homeDir = $env:USERPROFILE
+    if (-not $homeDir -and $env:HOMEDRIVE -and $env:HOMEPATH) { $homeDir = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
+    if (-not $homeDir) { $homeDir = $env:HOME }
+    if (-not $homeDir -and $env:USERNAME) { $homeDir = Join-Path 'C:\\Users' $env:USERNAME }
+    if (-not $homeDir) { return $null }
+
+    $sessionRoot = Join-Path $homeDir '.codex\\sessions'
+    if (-not (Test-Path -LiteralPath $sessionRoot)) { return $null }
+
+    $dates = @()
+    if ($StartTime) { $dates += $StartTime.Date }
+    if ($EndTime) { $dates += $EndTime.Date }
+    $dates = $dates | Select-Object -Unique
+
+    $candidates = @()
+    foreach ($dt in $dates) {
+      $dir = Join-Path $sessionRoot ($dt.ToString('yyyy\\MM\\dd'))
+      if (Test-Path -LiteralPath $dir) {
+        $files = Get-ChildItem -LiteralPath $dir -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue
+        if ($files) { $candidates += $files }
+      }
+    }
+    if ($candidates.Count -eq 0) {
+      $candidates = Get-ChildItem -LiteralPath $sessionRoot -Recurse -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 20
+    }
+    if ($candidates.Count -eq 0) { return $null }
+
+    $windowStart = if ($StartTime) { $StartTime.AddMinutes(-2) } else { (Get-Date).AddMinutes(-5) }
+    $windowEnd = if ($EndTime) { $EndTime.AddMinutes(2) } else { (Get-Date).AddMinutes(1) }
+    $pick = $candidates | Where-Object { $_.LastWriteTime -ge $windowStart -and $_.LastWriteTime -le $windowEnd } |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $pick) { $pick = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
+    if ($pick -and $pick.Name -match 'rollout-.*-([0-9a-f-]{16,})\\.jsonl$') {
+      return $Matches[1]
+    }
+  } catch {}
+  return $null
+}
+
 function Test-ProcessRunning {
   param([object]$ProcessId)
   if (-not $ProcessId) { return $false }
@@ -876,6 +930,12 @@ function Refresh-CodexJobState {
   $jobId = $info.id
   $outFile = $info.out_file
   $threadId = $info.thread_id
+  if (-not $threadId) {
+    $startTime = $null
+    try { if ($state.codex_job_started) { $startTime = [DateTime]::Parse($state.codex_job_started) } } catch {}
+    $endTime = Get-Date
+    $threadId = Resolve-CodexSessionFromRollout -StartTime $startTime -EndTime $endTime
+  }
   if ($threadId -and ($state.codex_session_id -ne $threadId)) {
     $state.codex_session_id = $threadId
     $state.codex_has_session = $true
