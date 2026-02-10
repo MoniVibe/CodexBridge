@@ -590,6 +590,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_job_result' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_exit' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_job_started' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_job_resume_thread' -Value $null
       if (-not $obj.codex_session_id) { $obj.codex_has_session = $false }
       return $obj
     } catch {}
@@ -614,6 +615,7 @@ function Load-State {
     codex_job_result = $null
     codex_job_exit = $null
     codex_job_started = $null
+    codex_job_resume_thread = $null
   }
   return $obj
 }
@@ -853,6 +855,7 @@ function Get-CodexJobInfo {
     started = $state.codex_job_started
     exit_code = $exitCode
     thread_id = if ($res -and $res.thread_id) { $res.thread_id } else { $null }
+    resume_thread_id = if ($res -and $res.resume_thread_id) { $res.resume_thread_id } else { $null }
     error = if ($res -and -not $res.ok) { $res.error } else { $null }
     out_file = $state.codex_job_outfile
     stdout_file = $state.codex_job_stdout
@@ -877,6 +880,27 @@ function Refresh-CodexJobState {
     $state.codex_session_id = $threadId
     $state.codex_has_session = $true
   }
+  if (-not $threadId) {
+    $resumeThread = $null
+    if ($info.PSObject.Properties.Name -contains 'resume_thread_id') { $resumeThread = $info.resume_thread_id }
+    if (-not $resumeThread) {
+      if ($state.PSObject.Properties.Name -contains 'codex_job_resume_thread') { $resumeThread = $state.codex_job_resume_thread }
+    }
+    if ($resumeThread) {
+      $state.codex_session_id = $resumeThread
+      $state.codex_has_session = $true
+    } else {
+      $since = $null
+      if ($state.codex_job_started) {
+        try { $since = [datetime]$state.codex_job_started } catch {}
+      }
+      if (-not $since -and $info.started) {
+        try { $since = [datetime]$info.started } catch {}
+      }
+      if (-not $since) { $since = Get-Date }
+      # Keep current session; do not attempt a filesystem fallback here.
+    }
+  }
 
   $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
   if (-not $state.codex_last_log -or ($state.codex_last_log -ne $finalLog) -or -not (Test-Path -LiteralPath $finalLog)) {
@@ -892,6 +916,8 @@ function Refresh-CodexJobState {
 
   # Clear PID so we don't treat the job as running again after it exits.
   $state.codex_job_pid = $null
+  Ensure-StateProperty -state $state -Name 'codex_job_resume_thread' -Value $null
+  $state.codex_job_resume_thread = $null
   Save-State -cfg $cfg -state $state
 
   return (Get-CodexJobInfo -cfg $cfg -state $state)
@@ -943,6 +969,7 @@ function Start-CodexExecJob {
 
   $proc = Start-Process -FilePath $cfg.PwshPath -ArgumentList $argList -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
 
+  Ensure-StateProperty -state $state -Name 'codex_job_resume_thread' -Value $null
   $state.codex_job_id = $jobId
   $state.codex_job_pid = $proc.Id
   $state.codex_job_prompt = $promptPath
@@ -952,6 +979,7 @@ function Start-CodexExecJob {
   $state.codex_job_result = $resultPath
   $state.codex_job_exit = $exitPath
   $state.codex_job_started = (Get-Date).ToString('o')
+  $state.codex_job_resume_thread = if ($resumeThread) { $resumeThread } else { $null }
   $state.codex_cwd = $workDir
   Save-State -cfg $cfg -state $state
 
@@ -1350,6 +1378,17 @@ while ($true) {
         if ($job -and $job.running) { throw "Codex job running (job_id=$($job.id)). Cancel it first." }
         $state.codex_session_id = $req.session
         $state.codex_has_session = $true
+        $state.codex_job_id = $null
+        $state.codex_job_pid = $null
+        $state.codex_job_prompt = $null
+        $state.codex_job_outfile = $null
+        $state.codex_job_stdout = $null
+        $state.codex_job_stderr = $null
+        $state.codex_job_result = $null
+        $state.codex_job_exit = $null
+        $state.codex_job_started = $null
+        Ensure-StateProperty -state $state -Name 'codex_job_resume_thread' -Value $null
+        $state.codex_job_resume_thread = $null
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ session = $state.codex_session_id } }
       }

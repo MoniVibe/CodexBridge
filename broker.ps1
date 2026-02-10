@@ -669,7 +669,7 @@ function Handle-Command {
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
         if ($jobId -and $jobPid) {
           Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex job $jobId. I'll reply here when it's done.")
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
         } else {
           if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
           Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
