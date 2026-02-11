@@ -1228,12 +1228,52 @@ function Resolve-CodexSessionFromRollout {
   return $null
 }
 
-function Test-ProcessRunning {
-  param([object]$ProcessId)
-  if (-not $ProcessId) { return $false }
+function Convert-ToDateTimeSafe {
+  param([object]$Value)
+  if ($null -eq $Value) { return $null }
+  if ($Value -is [datetime]) { return [datetime]$Value }
+  if ($Value -is [datetimeoffset]) { return ([datetimeoffset]$Value).DateTime }
+  $s = [string]$Value
+  if (-not $s) { return $null }
+  $s = $s.Trim()
+  if (-not $s) { return $null }
   try {
-    $p = Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue
-    return ($null -ne $p)
+    return [datetime]::Parse(
+      $s,
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [System.Globalization.DateTimeStyles]::RoundtripKind
+    )
+  } catch {}
+  try { return [datetime]::Parse($s) } catch {}
+  return $null
+}
+
+function Test-ProcessRunning {
+  param(
+    [object]$ProcessId,
+    [string]$ExpectedScriptPath,
+    [object]$StartedAt
+  )
+  if (-not $ProcessId) { return $false }
+  $pidInt = 0
+  if (-not [int]::TryParse([string]$ProcessId, [ref]$pidInt)) { return $false }
+  try {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId = $pidInt" -ErrorAction SilentlyContinue
+    if (-not $p) { return $false }
+
+    # Guard against PID reuse: if this PID now belongs to another process/script, it's not our job.
+    if ($ExpectedScriptPath) {
+      $cmd = [string]$p.CommandLine
+      if (-not $cmd -or $cmd -notmatch [regex]::Escape($ExpectedScriptPath)) { return $false }
+    }
+
+    # Additional PID reuse guard: process creation must not be much later than the job start.
+    $jobStarted = Convert-ToDateTimeSafe -Value $StartedAt
+    if ($jobStarted -and $p.CreationDate) {
+      $procStarted = Convert-ToDateTimeSafe -Value $p.CreationDate
+      if ($procStarted -and $procStarted -gt $jobStarted.AddMinutes(2)) { return $false }
+    }
+    return $true
   } catch {
     return $false
   }
@@ -1248,7 +1288,9 @@ function Get-CodexJobInfo {
 
   $procId = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_pid') { $procId = $state.codex_job_pid }
-  $running = Test-ProcessRunning -ProcessId $procId
+  $startedAt = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_job_started') { $startedAt = $state.codex_job_started }
+  $running = Test-ProcessRunning -ProcessId $procId -ExpectedScriptPath $cfg.CodexJobScript -StartedAt $startedAt
 
   $exitCode = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_exit' -and $state.codex_job_exit -and (Test-Path -LiteralPath $state.codex_job_exit)) {
@@ -1259,6 +1301,24 @@ function Get-CodexJobInfo {
   $res = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_result' -and $state.codex_job_result -and (Test-Path -LiteralPath $state.codex_job_result)) {
     try { $res = Get-Content -LiteralPath $state.codex_job_result -Raw | ConvertFrom-Json } catch {}
+  }
+
+  # If terminal artifacts exist, consider the job complete even if the process record is stale.
+  if ($exitCode -ne $null -or $res) { $running = $false }
+
+  # Some codex runs can hang after writing the final output file. If that file exists and
+  # has been stable for a bit, end the stale wrapper and treat the job as complete.
+  if ($running -and $state.PSObject.Properties.Name -contains 'codex_job_outfile' -and $state.codex_job_outfile -and (Test-Path -LiteralPath $state.codex_job_outfile)) {
+    try {
+      $outItem = Get-Item -LiteralPath $state.codex_job_outfile -ErrorAction SilentlyContinue
+      if ($outItem -and $outItem.Length -gt 0) {
+        $ageSec = ((Get-Date) - $outItem.LastWriteTime).TotalSeconds
+        if ($ageSec -ge 20 -and $procId) {
+          try { & taskkill.exe /PID ([int]$procId) /T /F | Out-Null } catch {}
+          $running = $false
+        }
+      }
+    } catch {}
   }
 
   return [ordered]@{
