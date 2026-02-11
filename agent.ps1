@@ -577,6 +577,13 @@ function Append-SessionInfo {
   return ($Text.TrimEnd() + "`n`n" + $suffix)
 }
 
+function Ensure-SessionInfoSuffix {
+  param($cfg, $state, [string]$Text)
+  if (-not $cfg.CodexAppendSession) { return $Text }
+  if ($Text -match '(^|\n)\\[telebot\\] codex_session_id:') { return $Text }
+  return (Append-SessionInfo -cfg $cfg -state $state -Text $Text)
+}
+
 function Get-LogTail {
   param([string]$LogPath, [int]$Lines)
   if (-not (Test-Path -LiteralPath $LogPath)) { return '(log missing)' }
@@ -1587,6 +1594,7 @@ while ($true) {
             if (-not $state.codex_last_log) { throw 'No codex output yet.' }
             $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
             $tail = Get-LogTail -LogPath $state.codex_last_log -Lines $lines
+            $tail = Ensure-SessionInfoSuffix -cfg $cfg -state $state -Text $tail
             $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
           }
         }
