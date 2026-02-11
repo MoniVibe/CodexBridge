@@ -481,6 +481,18 @@ function Send-CodexConsolePrompt {
   }
   Send-KeyCombo -Combo $cfg.CodexSendKey -Method $sendMethod
 
+  $sentAt = Get-Date
+  $rolloutSessionId = $null
+  if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) {
+    $rolloutSessionId = [string]$state.codex_session_id
+  }
+  $rolloutBaseline = @{ id = ''; timestamp = $null; text = '' }
+  $rolloutBaselineReady = $false
+  if ($rolloutSessionId) {
+    $rolloutBaseline = Get-LatestAssistantTextFromRollout -SessionId $rolloutSessionId
+    $rolloutBaselineReady = $true
+  }
+
   $offset = 0
   if ($state.codex_console_offset) { $offset = [long]$state.codex_console_offset }
   $maxWaitMs = [Math]::Max(2000, [int]$cfg.CodexWaitSec * 1000)
@@ -489,6 +501,7 @@ function Send-CodexConsolePrompt {
   $deadline = (Get-Date).AddMilliseconds($maxWaitMs)
   $raw = ''
   $lastCleanAt = $null
+  $rolloutText = ''
 
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds $pollMs
@@ -502,14 +515,40 @@ function Send-CodexConsolePrompt {
         if ($chunk) { $lastCleanAt = Get-Date }
       }
     }
+
+    # Transcript is unreliable on some setups; fall back to Codex rollout files for console replies.
+    if (-not $rolloutSessionId) {
+      $resolvedSid = Resolve-CodexSessionFromRollout -StartTime $sentAt.AddMinutes(-10) -EndTime (Get-Date)
+      if ($resolvedSid) {
+        $rolloutSessionId = $resolvedSid
+        if ($state.codex_session_id -ne $rolloutSessionId) {
+          $state.codex_session_id = $rolloutSessionId
+          $state.codex_has_session = $true
+          Save-State -cfg $cfg -state $state
+        }
+      }
+    }
+    if ($rolloutSessionId) {
+      $snap = Get-LatestAssistantTextFromRollout -SessionId $rolloutSessionId
+      if (-not $rolloutBaselineReady) {
+        $rolloutBaseline = $snap
+        $rolloutBaselineReady = $true
+      } elseif ($snap.id -and $snap.id -ne $rolloutBaseline.id -and $snap.text) {
+        $rolloutText = $snap.text
+        break
+      }
+    }
+
     if ($lastCleanAt -and (((Get-Date) - $lastCleanAt).TotalMilliseconds -ge $idleSettleMs)) { break }
   }
 
   $state.codex_console_offset = $offset
   Save-State -cfg $cfg -state $state
 
-  if (-not $raw) { return '(no output yet)' }
   $clean = Clean-TranscriptText -Text $raw
+  if ($clean) { return $clean }
+  if ($rolloutText) { return $rolloutText }
+  if (-not $raw) { return '(no output yet)' }
   if (-not $clean) { return '(sent; no output yet)' }
   return $clean
 }
@@ -907,17 +946,94 @@ function Get-EffectiveCodexMode {
   return $mode.ToLowerInvariant()
 }
 
+function Get-CodexSessionRoot {
+  $homeDir = $env:USERPROFILE
+  if (-not $homeDir -and $env:HOMEDRIVE -and $env:HOMEPATH) { $homeDir = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
+  if (-not $homeDir) { $homeDir = $env:HOME }
+  if (-not $homeDir -and $env:USERNAME) { $homeDir = Join-Path 'C:\\Users' $env:USERNAME }
+  if (-not $homeDir) { return $null }
+  $sessionRoot = Join-Path $homeDir '.codex\\sessions'
+  if (-not (Test-Path -LiteralPath $sessionRoot)) { return $null }
+  return $sessionRoot
+}
+
+function Resolve-RolloutFileForSession {
+  param([string]$SessionId)
+  if (-not $SessionId) { return $null }
+  try {
+    $sessionRoot = Get-CodexSessionRoot
+    if (-not $sessionRoot) { return $null }
+
+    $pattern = "rollout-*-${SessionId}.jsonl"
+    $now = Get-Date
+    $dates = @($now.Date, $now.AddDays(-1).Date, $now.AddDays(1).Date) | Select-Object -Unique
+    $candidates = @()
+    foreach ($dt in $dates) {
+      $dir = Join-Path $sessionRoot ($dt.ToString('yyyy\\MM\\dd'))
+      if (Test-Path -LiteralPath $dir) {
+        $files = Get-ChildItem -LiteralPath $dir -Filter $pattern -ErrorAction SilentlyContinue
+        if ($files) { $candidates += $files }
+      }
+    }
+    if ($candidates.Count -eq 0) {
+      $candidates = Get-ChildItem -LiteralPath $sessionRoot -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 10
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    $pick = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($pick) { return $pick.FullName }
+  } catch {}
+  return $null
+}
+
+function Get-LatestAssistantTextFromRollout {
+  param([string]$SessionId, [int]$TailLines = 400)
+  $out = @{ id = ''; timestamp = $null; text = ''; path = $null }
+  if (-not $SessionId) { return $out }
+  $path = Resolve-RolloutFileForSession -SessionId $SessionId
+  if (-not $path) { return $out }
+  $out.path = $path
+  try {
+    $lines = Get-Content -LiteralPath $path -Tail $TailLines -ErrorAction SilentlyContinue
+    if (-not $lines) { return $out }
+    foreach ($line in $lines) {
+      if (-not $line) { continue }
+      $obj = $null
+      try { $obj = $line | ConvertFrom-Json -Depth 20 } catch { continue }
+      if (-not $obj) { continue }
+      if ($obj.type -ne 'response_item') { continue }
+      if (-not $obj.payload) { continue }
+      if ($obj.payload.type -ne 'message' -or $obj.payload.role -ne 'assistant') { continue }
+
+      $parts = New-Object System.Collections.Generic.List[string]
+      foreach ($c in @($obj.payload.content)) {
+        if (-not $c) { continue }
+        try {
+          if ($c.type -eq 'output_text' -and $c.text) { $parts.Add([string]$c.text) }
+          elseif ($c.type -eq 'text' -and $c.text) { $parts.Add([string]$c.text) }
+        } catch {}
+      }
+      if ($parts.Count -eq 0) { continue }
+      $txt = ($parts -join "`n").Trim()
+      if (-not $txt) { continue }
+
+      $ts = $null
+      try { if ($obj.timestamp) { $ts = [datetime]$obj.timestamp } } catch {}
+      $id = ''
+      if ($obj.timestamp) { $id = [string]$obj.timestamp } else { $id = ("len:{0}" -f $txt.Length) }
+
+      $out.id = $id
+      $out.timestamp = $ts
+      $out.text = $txt
+    }
+  } catch {}
+  return $out
+}
+
 function Resolve-CodexSessionFromRollout {
   param([datetime]$StartTime, [datetime]$EndTime)
   try {
-    # Avoid $HOME (automatic variable, case-insensitive) by using a different name.
-    $homeDir = $env:USERPROFILE
-    if (-not $homeDir -and $env:HOMEDRIVE -and $env:HOMEPATH) { $homeDir = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
-    if (-not $homeDir) { $homeDir = $env:HOME }
-    if (-not $homeDir -and $env:USERNAME) { $homeDir = Join-Path 'C:\\Users' $env:USERNAME }
-    if (-not $homeDir) { return $null }
-
-    $sessionRoot = Join-Path $homeDir '.codex\\sessions'
+    $sessionRoot = Get-CodexSessionRoot
     if (-not (Test-Path -LiteralPath $sessionRoot)) { return $null }
 
     $dates = @()
@@ -1658,9 +1774,22 @@ while ($true) {
         $resp = @{ ok = $true; result = @{ session = $null } }
       }
       'codex.last' {
-        if ($cfg.CodexMode -eq 'console') {
+        $mode = Get-EffectiveCodexMode -cfg $cfg -state $state
+        if ($mode -eq 'console') {
           $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
           $tail = Get-LogTail -LogPath $cfg.CodexTranscript -Lines $lines
+          $cleanTail = Clean-TranscriptText -Text $tail
+          if ($cleanTail) {
+            $tail = $cleanTail
+          } else {
+            $sid = $null
+            if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $sid = [string]$state.codex_session_id }
+            if (-not $sid) { $sid = Resolve-CodexSessionFromRollout -StartTime (Get-Date).AddMinutes(-30) -EndTime (Get-Date) }
+            if ($sid) {
+              $snap = Get-LatestAssistantTextFromRollout -SessionId $sid
+              if ($snap.text) { $tail = $snap.text }
+            }
+          }
           $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
         } else {
           $job = Refresh-CodexJobState -cfg $cfg -state $state

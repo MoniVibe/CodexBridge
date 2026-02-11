@@ -355,6 +355,24 @@ function Format-ResultText {
   if ($resp.result -and $resp.result.output) { return $resp.result.output }
   return ($resp | ConvertTo-Json -Depth 8)
 }
+function Is-NoOutputText {
+  param([string]$Text)
+  if (-not $Text) { return $true }
+  $t = $Text.Trim().ToLowerInvariant()
+  return ($t -eq '(no output yet)' -or $t -eq '(sent; no output yet)' -or $t -eq '(no output)')
+}
+function Try-Resolve-ConsoleOutput {
+  param($cfg, [string]$Target, [int]$Attempts = 6, [int]$DelayMs = 500)
+  for ($i = 0; $i -lt $Attempts; $i++) {
+    if ($DelayMs -gt 0) { Start-Sleep -Milliseconds $DelayMs }
+    $lr = Send-AgentRequest -cfg $cfg -Target $Target -Payload @{ op = 'codex.last'; session = 'default' }
+    if (-not $lr.ok) { continue }
+    if (-not $lr.result -or -not $lr.result.output) { continue }
+    $txt = [string]$lr.result.output
+    if (-not (Is-NoOutputText -Text $txt)) { return $txt }
+  }
+  return $null
+}
 function Is-WhitespaceChar {
   param([char]$Ch)
   if ([char]::IsWhiteSpace($Ch)) { return $true }
@@ -961,7 +979,12 @@ function Handle-Command {
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
 
-        if ($cfg.ConsoleFallbackExec -and $parsed.prompt -and ($out -eq '(no output yet)' -or $out -eq '(sent; no output yet)')) {
+        if ($parsed.prompt -and (Is-NoOutputText -Text $out)) {
+          $polledOut = Try-Resolve-ConsoleOutput -cfg $cfg -Target $consoleTarget
+          if ($polledOut) { $out = $polledOut }
+        }
+
+        if ($cfg.ConsoleFallbackExec -and $parsed.prompt -and (Is-NoOutputText -Text $out)) {
           $fallback = Send-AgentRequest -cfg $cfg -Target $consoleTarget -Payload @{ op = 'codex.send.exec'; prompt = $parsed.prompt }
           if ($fallback.ok) {
             $resp = $fallback
@@ -1015,7 +1038,12 @@ function Handle-Command {
         if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
         if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
 
-        if ($parsed.prompt -and ($out -eq '(no output yet)' -or $out -eq '(sent; no output yet)')) {
+        if ($parsed.prompt -and (Is-NoOutputText -Text $out)) {
+          $polledOut = Try-Resolve-ConsoleOutput -cfg $cfg -Target $consoleTarget
+          if ($polledOut) { $out = $polledOut }
+        }
+
+        if ($parsed.prompt -and (Is-NoOutputText -Text $out)) {
           $fallback = Send-AgentRequest -cfg $cfg -Target $consoleTarget -Payload @{ op = 'codex.send.exec'; prompt = $parsed.prompt }
           if ($fallback.ok) {
             $resp = $fallback
