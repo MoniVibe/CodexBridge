@@ -158,12 +158,24 @@ function Save-State {
 }
 
 function Send-TgMessage {
-  param($cfg, [string]$ChatId, [string]$Text)
+  param($cfg, [string]$ChatId, [string]$Text, $ReplyMarkup = $null)
   if (-not $Text) { $Text = '(empty)' }
   $uri = "https://api.telegram.org/bot$($cfg.BotToken)/sendMessage"
   $body = @{ chat_id = $ChatId; text = $Text; disable_web_page_preview = $true }
+  if ($ReplyMarkup) { $body.reply_markup = ($ReplyMarkup | ConvertTo-Json -Compress -Depth 8) }
   try { Invoke-RestMethod -Method Post -Uri $uri -Body $body | Out-Null } catch {
     Write-BotLog -Path $cfg.BotLog -Message "sendMessage failed: $($_.Exception.Message)"
+  }
+}
+
+function Answer-TgCallback {
+  param($cfg, [string]$CallbackQueryId, [string]$Text = '')
+  if (-not $CallbackQueryId) { return }
+  $uri = "https://api.telegram.org/bot$($cfg.BotToken)/answerCallbackQuery"
+  $body = @{ callback_query_id = $CallbackQueryId }
+  if ($Text) { $body.text = $Text }
+  try { Invoke-RestMethod -Method Post -Uri $uri -Body $body | Out-Null } catch {
+    Write-BotLog -Path $cfg.BotLog -Message "answerCallbackQuery failed: $($_.Exception.Message)"
   }
 }
 
@@ -396,6 +408,176 @@ function Parse-ModeCommand {
   return @{ action = 'send'; prompt = $trim }
 }
 
+function Get-CodexConfigSnapshot {
+  param($cfg, [string]$Target)
+  $m = Send-AgentRequest -cfg $cfg -Target $Target -Payload @{ op = 'codex.model.get' }
+  if (-not $m.ok) { return @{ ok = $false; error = $m.error } }
+  $r = Send-AgentRequest -cfg $cfg -Target $Target -Payload @{ op = 'codex.reasoning.get' }
+  if (-not $r.ok) { return @{ ok = $false; error = $r.error } }
+  $mode = Send-AgentRequest -cfg $cfg -Target $Target -Payload @{ op = 'codex.mode.get' }
+  if (-not $mode.ok) { return @{ ok = $false; error = $mode.error } }
+
+  $modelRaw = ''
+  if ($m.result -and $m.result.model) { $modelRaw = [string]$m.result.model }
+  $reasoningRaw = ''
+  if ($r.result -and $r.result.reasoning_effort) { $reasoningRaw = [string]$r.result.reasoning_effort }
+  $modeRaw = 'exec'
+  if ($mode.result -and $mode.result.mode) { $modeRaw = ([string]$mode.result.mode).ToLowerInvariant() }
+
+  return @{
+    ok = $true
+    model_raw = $modelRaw
+    reasoning_raw = $reasoningRaw
+    mode_raw = $modeRaw
+  }
+}
+
+function New-CodexConfigMarkup {
+  param([string]$Target, [string]$ModelRaw, [string]$ReasoningRaw, [string]$ModeRaw)
+  $targetSafe = if ($Target) { $Target } else { 'local' }
+  $modelVal = if ($ModelRaw) { $ModelRaw } else { '' }
+  $reasoningVal = if ($ReasoningRaw) { $ReasoningRaw.ToLowerInvariant() } else { '' }
+  $modeVal = if ($ModeRaw) { $ModeRaw.ToLowerInvariant() } else { 'exec' }
+
+  $execLabel = if ($modeVal -eq 'exec') { '[x] Exec mode' } else { '[ ] Exec mode' }
+  $m53Label = if ($modelVal -eq 'gpt-5.3-codex') { '[x] gpt-5.3-codex' } else { '[ ] gpt-5.3-codex' }
+  $m52Label = if ($modelVal -eq 'gpt-5.2-codex') { '[x] gpt-5.2-codex' } else { '[ ] gpt-5.2-codex' }
+  $mDefLabel = if (-not $modelVal) { '[x] model: default' } else { '[ ] model: default' }
+  $rLowLabel = if ($reasoningVal -eq 'low') { '[x] reasoning: low' } else { '[ ] reasoning: low' }
+  $rMedLabel = if ($reasoningVal -eq 'medium') { '[x] reasoning: medium' } else { '[ ] reasoning: medium' }
+  $rHighLabel = if ($reasoningVal -eq 'high') { '[x] reasoning: high' } else { '[ ] reasoning: high' }
+  $rXHighLabel = if ($reasoningVal -eq 'xhigh') { '[x] reasoning: xhigh' } else { '[ ] reasoning: xhigh' }
+  $rDefLabel = if (-not $reasoningVal) { '[x] reasoning: default' } else { '[ ] reasoning: default' }
+
+  return @{
+    inline_keyboard = @(
+      @(
+        @{ text = $execLabel; callback_data = "cf|$targetSafe|x|exec" },
+        @{ text = 'Refresh'; callback_data = "cf|$targetSafe|r|_" }
+      ),
+      @(
+        @{ text = $m53Label; callback_data = "cf|$targetSafe|m|gpt-5.3-codex" }
+      ),
+      @(
+        @{ text = $m52Label; callback_data = "cf|$targetSafe|m|gpt-5.2-codex" },
+        @{ text = $mDefLabel; callback_data = "cf|$targetSafe|m|def" }
+      ),
+      @(
+        @{ text = $rLowLabel; callback_data = "cf|$targetSafe|e|low" },
+        @{ text = $rMedLabel; callback_data = "cf|$targetSafe|e|medium" }
+      ),
+      @(
+        @{ text = $rHighLabel; callback_data = "cf|$targetSafe|e|high" },
+        @{ text = $rXHighLabel; callback_data = "cf|$targetSafe|e|xhigh" },
+        @{ text = $rDefLabel; callback_data = "cf|$targetSafe|e|def" }
+      )
+    )
+  }
+}
+
+function Send-CodexConfigPanel {
+  param($cfg, [string]$ChatId, [string]$Target, [string]$Notice = '')
+  $snap = Get-CodexConfigSnapshot -cfg $cfg -Target $Target
+  if (-not $snap.ok) {
+    Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Error: " + $snap.error)
+    return
+  }
+  $mode = if ($snap.mode_raw) { $snap.mode_raw } else { 'exec' }
+  $model = if ($snap.model_raw) { $snap.model_raw } else { 'default' }
+  $reasoning = if ($snap.reasoning_raw) { $snap.reasoning_raw } else { 'default' }
+  $text = "[telebot] target: $Target`nmode: $mode`nmodel: $model`nreasoning: $reasoning`n`nExec is default for prompts."
+  if ($Notice) { $text = $Notice + "`n`n" + $text }
+  $markup = New-CodexConfigMarkup -Target $Target -ModelRaw $snap.model_raw -ReasoningRaw $snap.reasoning_raw -ModeRaw $snap.mode_raw
+  Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $text -ReplyMarkup $markup
+}
+
+function Handle-CallbackQuery {
+  param($cfg, $state, $Query)
+  $cbId = ''
+  $data = ''
+  try { if ($Query.id) { $cbId = [string]$Query.id } } catch {}
+  try { if ($Query.data) { $data = [string]$Query.data } } catch {}
+  if (-not $cbId) { return }
+
+  $chatId = $null
+  try { if ($Query.message -and $Query.message.chat -and $Query.message.chat.id) { $chatId = [string]$Query.message.chat.id } } catch {}
+  if (-not $chatId) {
+    try { if ($Query.from -and $Query.from.id) { $chatId = [string]$Query.from.id } } catch {}
+  }
+  if (-not $chatId) {
+    Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'No chat context.'
+    return
+  }
+  if (-not (Is-AllowedChat -cfg $cfg -ChatId $chatId)) {
+    Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Unauthorized chat.'
+    return
+  }
+  if (-not $data.StartsWith('cf|')) {
+    Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Unsupported action.'
+    return
+  }
+
+  $parts = $data -split '\|', 4
+  if ($parts.Count -lt 4) {
+    Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Malformed action.'
+    return
+  }
+
+  $target = $parts[1].ToLowerInvariant()
+  if (-not $cfg.Targets.ContainsKey($target)) { $target = $cfg.DefaultTarget }
+  $action = $parts[2].ToLowerInvariant()
+  $value = $parts[3]
+  $notice = ''
+
+  switch ($action) {
+    'r' {
+      Send-CodexConfigPanel -cfg $cfg -ChatId $chatId -Target $target -Notice 'Refreshed config.'
+      Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Refreshed.'
+      return
+    }
+    'x' {
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' }
+      if (-not $resp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $chatId -Text (Format-ResultText $resp)
+        Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Failed.'
+        return
+      }
+      $notice = 'Mode set to exec.'
+    }
+    'm' {
+      $model = $value
+      if ($model.ToLowerInvariant() -eq 'def') { $model = '' }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.model'; model = $model; reset = $false }
+      if (-not $resp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $chatId -Text (Format-ResultText $resp)
+        Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Failed.'
+        return
+      }
+      try { $null = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' } } catch {}
+      if (-not $model) { $notice = 'Model set to default.' } else { $notice = "Model set to $model." }
+    }
+    'e' {
+      $reasoning = $value.ToLowerInvariant()
+      if ($reasoning -eq 'def') { $reasoning = '' }
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.reasoning'; reasoning_effort = $reasoning; reset = $false }
+      if (-not $resp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $chatId -Text (Format-ResultText $resp)
+        Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Failed.'
+        return
+      }
+      try { $null = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' } } catch {}
+      if (-not $reasoning) { $notice = 'Reasoning set to default.' } else { $notice = "Reasoning set to $reasoning." }
+    }
+    default {
+      Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Unknown action.'
+      return
+    }
+  }
+
+  Send-CodexConfigPanel -cfg $cfg -ChatId $chatId -Target $target -Notice $notice
+  Answer-TgCallback -cfg $cfg -CallbackQueryId $cbId -Text 'Updated.'
+}
+
 function Acquire-BrokerMutex {
   param([string]$Name)
   try {
@@ -429,9 +611,9 @@ function Is-KnownCommandOrTarget {
   if ($cfg.Targets.ContainsKey($token)) { return $true }
   $known = @(
     'help','status','run','last','tail','get','codex','codexnew','codexfresh','codexfreshconsole','agent',
-    'codexsession','codexjob','codexcancel','codexmodel','codexuse','codexresume','codexreset','codexstart','codexstop','codexlist','codexlast',
+    'codexsession','codexjob','codexcancel','codexmodel','codexreasoning','codexconfig','codexuse','codexresume','codexreset','codexstart','codexstop','codexlist','codexlast',
     'codexexec','codexexecnew','codexforceexec','codexforceexecnew','codexconsole','codexconsolenew','codexconsoleexec','codexconsoleexecnew',
-    'cancel','job','model','session','console'
+    'cancel','job','model','reasoning','config','session','console'
   )
   return $known -contains $token
 }
@@ -528,6 +710,8 @@ function Handle-Command {
     'job'     = 'codexjob'
     'codexstatus' = 'codexjob'
     'model'   = 'codexmodel'
+    'reasoning' = 'codexreasoning'
+    'config' = 'codexconfig'
     'session' = 'codexsession'
     'agent'   = 'codex'
     'console' = 'codexconsole'
@@ -555,7 +739,7 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -644,6 +828,18 @@ function Handle-Command {
       # Allow "codex exec ..." shorthand.
       if ($subCmd -eq 'exec') {
         $cmd = 'codexexec'
+        $rest = $subRest
+      }
+      if ($subCmd -eq 'model') {
+        $cmd = 'codexmodel'
+        $rest = $subRest
+      }
+      if ($subCmd -eq 'reasoning') {
+        $cmd = 'codexreasoning'
+        $rest = $subRest
+      }
+      if ($subCmd -eq 'config') {
+        $cmd = 'codexconfig'
         $rest = $subRest
       }
 
@@ -944,15 +1140,43 @@ function Handle-Command {
 
       $tokens = $rest -split '\s+'
       $reset = $false
-      if ($tokens.Count -gt 1 -and $tokens[-1].ToLowerInvariant() -eq 'reset') {
+      if ($tokens.Count -ge 1 -and $tokens[-1].ToLowerInvariant() -eq 'reset') {
         $reset = $true
-        $tokens = $tokens[0..($tokens.Count - 2)]
+        if ($tokens.Count -gt 1) { $tokens = $tokens[0..($tokens.Count - 2)] } else { $tokens = @() }
       }
       $model = ($tokens -join ' ').Trim()
       if ($model.ToLowerInvariant() -in @('default','clear','none')) { $model = '' }
 
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.model'; model = $model; reset = $reset }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'codexreasoning' {
+      if (-not $rest) {
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.reasoning.get' }
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        return
+      }
+
+      $tokens = $rest -split '\s+'
+      $reset = $false
+      if ($tokens.Count -ge 1 -and $tokens[-1].ToLowerInvariant() -eq 'reset') {
+        $reset = $true
+        if ($tokens.Count -gt 1) { $tokens = $tokens[0..($tokens.Count - 2)] } else { $tokens = @() }
+      }
+      $reasoning = (($tokens -join ' ').Trim()).ToLowerInvariant()
+      if ($reasoning -in @('default','clear','none')) { $reasoning = '' }
+      if ($reasoning -and ($reasoning -notin @('low','medium','high','xhigh'))) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codexreasoning [low|medium|high|xhigh|default] [reset]'
+        return
+      }
+
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.reasoning'; reasoning_effort = $reasoning; reset = $reset }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'codexconfig' {
+      Send-CodexConfigPanel -cfg $cfg -ChatId $ChatId -Target $target
       return
     }
     'codexuse' {
@@ -1070,6 +1294,19 @@ while ($true) {
       $offset = [int]$update.update_id + 1
       try { $state.last_update_id = $offset } catch { Ensure-StateProperty -state $state -Name 'last_update_id' -Value $offset; try { $state.last_update_id = $offset } catch {} }
       Save-State -cfg $cfg -state $state
+      $cb = $update.callback_query
+      if ($cb) {
+        try {
+          Handle-CallbackQuery -cfg $cfg -state $state -Query $cb
+        } catch {
+          Write-BotLog -Path $cfg.BotLog -Message "Handle-CallbackQuery failed: $($_.Exception.Message)"
+          try {
+            $cbid = [string]$cb.id
+            if ($cbid) { Answer-TgCallback -cfg $cfg -CallbackQueryId $cbid -Text 'Action failed.' }
+          } catch {}
+        }
+        continue
+      }
       $msg = $update.message
       if (-not $msg) { continue }
       $chatId = [string]$msg.chat.id

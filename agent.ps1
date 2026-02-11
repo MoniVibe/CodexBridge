@@ -1349,10 +1349,14 @@ while ($true) {
         $activeModel = $null
         if ($state.PSObject.Properties.Name -contains 'codex_model' -and $state.codex_model) { $activeModel = $state.codex_model }
         elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
+        $activeReasoning = $null
+        if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $activeReasoning = $state.codex_reasoning_effort }
+        elseif ($cfg.CodexReasoningEffort) { $activeReasoning = $cfg.CodexReasoningEffort }
+        elseif ($cfg.CodexUserConfigReasoningEffort) { $activeReasoning = $cfg.CodexUserConfigReasoningEffort }
         $activeMode = Get-EffectiveCodexMode -cfg $cfg -state $state
         $null = Refresh-CodexJobState -cfg $cfg -state $state
         $job = Get-CodexJobInfo -cfg $cfg -state $state
-        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel; codex_mode = $activeMode; codex_mode_override = $state.codex_mode_override; codex_job = $job } }
+        $resp = @{ ok = $true; result = @{ name = $cfg.Name; sessions = (List-CodexSessions); codex_model = $activeModel; codex_reasoning_effort = $activeReasoning; codex_mode = $activeMode; codex_mode_override = $state.codex_mode_override; codex_job = $job } }
       }
       'run' {
         if (-not $req.cmd) { throw 'cmd missing.' }
@@ -1505,6 +1509,13 @@ while ($true) {
         elseif ($cfg.CodexModel) { $activeModel = $cfg.CodexModel }
         $resp = @{ ok = $true; result = @{ model = $activeModel; state_model = $state.codex_model; config_model = $cfg.CodexModel } }
       }
+      'codex.reasoning.get' {
+        $activeReasoning = $null
+        if ($state.PSObject.Properties.Name -contains 'codex_reasoning_effort' -and $state.codex_reasoning_effort) { $activeReasoning = $state.codex_reasoning_effort }
+        elseif ($cfg.CodexReasoningEffort) { $activeReasoning = $cfg.CodexReasoningEffort }
+        elseif ($cfg.CodexUserConfigReasoningEffort) { $activeReasoning = $cfg.CodexUserConfigReasoningEffort }
+        $resp = @{ ok = $true; result = @{ reasoning_effort = $activeReasoning; state_reasoning_effort = $state.codex_reasoning_effort; config_reasoning_effort = $cfg.CodexReasoningEffort; user_config_reasoning_effort = $cfg.CodexUserConfigReasoningEffort } }
+      }
       'codex.mode.get' {
         $activeMode = Get-EffectiveCodexMode -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ mode = $activeMode; override = $state.codex_mode_override; config_mode = $cfg.CodexMode } }
@@ -1541,6 +1552,40 @@ while ($true) {
 
         Save-State -cfg $cfg -state $state
         $resp = @{ ok = $true; result = @{ model = $state.codex_model; reset = $doReset } }
+      }
+      'codex.reasoning' {
+        $r = ''
+        if ($req.reasoning_effort) { $r = [string]$req.reasoning_effort }
+        $r = $r.Trim().ToLowerInvariant()
+        if ($r -in @('default','clear','none')) { $r = '' }
+        if (-not $r) { $state.codex_reasoning_effort = $null } else { $state.codex_reasoning_effort = $r }
+
+        $doReset = $false
+        if ($req.reset -ne $null) {
+          $doReset = ([string]$req.reset -match '^(1|true|yes)$')
+        }
+
+        $job = Get-CodexJobInfo -cfg $cfg -state $state
+        if ($job -and $job.running -and -not $doReset) {
+          throw "Codex job running (job_id=$($job.id)). Use reset to cancel+clear first."
+        }
+        if ($doReset) {
+          $null = Cancel-CodexJob -cfg $cfg -state $state
+          $state.codex_session_id = $null
+          $state.codex_has_session = $false
+          $state.codex_job_id = $null
+          $state.codex_job_pid = $null
+          $state.codex_job_prompt = $null
+          $state.codex_job_outfile = $null
+          $state.codex_job_stdout = $null
+          $state.codex_job_stderr = $null
+          $state.codex_job_result = $null
+          $state.codex_job_exit = $null
+          $state.codex_job_started = $null
+        }
+
+        Save-State -cfg $cfg -state $state
+        $resp = @{ ok = $true; result = @{ reasoning_effort = $state.codex_reasoning_effort; reset = $doReset } }
       }
       'codex.mode' {
         $m = ''

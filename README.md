@@ -48,6 +48,8 @@ Target prefix is optional:
 - `[<target>] codexlast [lines]`: tail the last Codex output
 - `[<target>] codexsession`: show stored Codex thread id
 - `[<target>] codexmodel [model] [reset]`: show or set the Codex model (optional `reset` clears the thread id)
+- `[<target>] codexreasoning [low|medium|high|xhigh|default] [reset]`: show or set reasoning effort (alias: `reasoning`)
+- `[<target>] codexconfig`: show an inline-button config panel for mode/model/reasoning (alias: `config`)
 - `[<target>] codexjob`: show current Codex job status (async mode)
 - `[<target>] codexcancel` (alias: `cancel`): cancel the running Codex job (async mode)
 - `[<target>] codexuse <thread_id>`: resume a specific thread id (alias: `codexresume`)
@@ -72,6 +74,7 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 
 ## Notes
 - Headless exec mode is default (`CODEX_MODE=exec`) and does not require a window.
+- Broker prompt routing is exec-first (`codex` and plain text use exec).
 - Set `CODEX_CWD` to your preferred working directory.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
