@@ -573,42 +573,40 @@ function Append-SessionInfo {
     elseif ($machineName) { $machineName }
     else { 'unknown' }
   $suffix = "[telebot] codex_session_id: $sid | model: $model | reasoning: $reasoning | perms: $perms | cwd: $cwd | agent: $agentLabel"
-  if (-not $Text) { return $suffix }
-  return ($Text.TrimEnd() + "`n`n" + $suffix)
+
+  # Normalize any trailing telebot suffix lines so repeated append paths still yield one suffix.
+  $base = if ($Text) { $Text.TrimEnd() } else { '' }
+  if ($base) {
+    $lines = $base -split "`r?`n"
+    $i = $lines.Length - 1
+    while ($i -ge 0 -and $lines[$i].Trim() -eq '') { $i-- }
+    $sawSuffix = $false
+    while ($i -ge 0) {
+      if ($lines[$i].Trim() -eq '') {
+        if ($sawSuffix) { $i--; continue }
+        break
+      }
+      if ($lines[$i] -match '^\[telebot\] codex_session_id:') {
+        $sawSuffix = $true
+        $i--
+        continue
+      }
+      break
+    }
+    if ($sawSuffix) {
+      if ($i -ge 0) { $base = (($lines[0..$i] -join "`n").TrimEnd()) } else { $base = '' }
+    }
+  }
+
+  if (-not $base) { return $suffix }
+  return ($base + "`n`n" + $suffix)
 }
 
 function Ensure-SessionInfoSuffix {
   param($cfg, $state, [string]$Text)
   if (-not $cfg.CodexAppendSession) { return $Text }
-
   if (-not $Text) { return $Text }
-
-  # If we ever accidentally appended twice, drop the duplicate (only if the last two non-empty lines are identical suffixes).
-  $trimmed = $Text.TrimEnd()
-  $lines = $trimmed -split "`r?`n"
-  $iLast = $lines.Length - 1
-  while ($iLast -ge 0 -and $lines[$iLast].Trim() -eq '') { $iLast-- }
-  $iPrev = $iLast - 1
-  while ($iPrev -ge 0 -and $lines[$iPrev].Trim() -eq '') { $iPrev-- }
-  if ($iLast -ge 0 -and $iPrev -ge 0) {
-    if ($lines[$iLast] -match '^\\[telebot\\] codex_session_id:' -and $lines[$iPrev] -match '^\\[telebot\\] codex_session_id:') {
-      if ($lines[$iLast] -eq $lines[$iPrev]) {
-        $kept = New-Object System.Collections.Generic.List[string]
-        for ($j = 0; $j -le $iLast; $j++) {
-          if ($j -eq $iPrev) { continue }
-          if ($j -gt $iPrev -and $j -lt $iLast -and $lines[$j].Trim() -eq '') { continue }
-          $kept.Add($lines[$j])
-        }
-        $trimmed = ($kept -join "`n")
-        $lines = $trimmed -split "`r?`n"
-      }
-    }
-  }
-
-  # Already has suffix (with either LF or CRLF)? Keep as-is.
-  if ($trimmed -match '(^|\r?\n)\[telebot\] codex_session_id:') { return $trimmed }
-
-  return (Append-SessionInfo -cfg $cfg -state $state -Text $trimmed)
+  return (Append-SessionInfo -cfg $cfg -state $state -Text $Text)
 }
 
 function Get-LogTail {
