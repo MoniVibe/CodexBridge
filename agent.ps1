@@ -456,6 +456,8 @@ public static class NativeWindowUtil {
   public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }
 "@
   }
@@ -468,14 +470,64 @@ public static class NativeWindowUtil {
   } catch { return '' }
 }
 
+function Get-ForegroundWindowInfo {
+  $info = @{
+    title = ''
+    pid = 0
+    process = ''
+  }
+  try {
+    $h = [NativeWindowUtil]::GetForegroundWindow()
+    if ($h -eq [IntPtr]::Zero) { return $info }
+    $sb = New-Object System.Text.StringBuilder 512
+    $null = [NativeWindowUtil]::GetWindowText($h, $sb, $sb.Capacity)
+    $info.title = $sb.ToString()
+    [uint32]$pid = 0
+    $null = [NativeWindowUtil]::GetWindowThreadProcessId($h, [ref]$pid)
+    if ($pid -gt 0) {
+      $info.pid = [int]$pid
+      try { $info.process = (Get-Process -Id ([int]$pid) -ErrorAction Stop).ProcessName } catch {}
+    }
+  } catch {}
+  return $info
+}
+
+function Get-ParentProcessId {
+  param([int]$ProcessId)
+  if ($ProcessId -le 0) { return 0 }
+  try {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+    if ($proc -and $proc.ParentProcessId) { return [int]$proc.ParentProcessId }
+  } catch {}
+  return 0
+}
+
+function Test-RelatedProcess {
+  param([int]$A, [int]$B)
+  if ($A -le 0 -or $B -le 0) { return $false }
+  if ($A -eq $B) { return $true }
+  $pa = Get-ParentProcessId -ProcessId $A
+  $pb = Get-ParentProcessId -ProcessId $B
+  if ($pa -eq $B -or $pb -eq $A) { return $true }
+  if ($pa -gt 0 -and $pb -gt 0 -and $pa -eq $pb) { return $true }
+  return $false
+}
+
 function Ensure-WindowForeground {
-  param($shell, [string]$Title, [int]$Attempts = 8)
-  if (-not $Title) { return $false }
+  param($shell, [string]$Title, [int]$Attempts = 8, [int]$ConsolePid = 0)
+  if (-not $Title -and $ConsolePid -le 0) { return $false }
   for ($i = 0; $i -lt $Attempts; $i++) {
-    try { $null = $shell.AppActivate($Title) } catch {}
+    $activated = $false
+    if ($ConsolePid -gt 0) {
+      try { $activated = $shell.AppActivate($ConsolePid) } catch { $activated = $false }
+    }
+    if (-not $activated -and $Title) {
+      try { $activated = $shell.AppActivate($Title) } catch {}
+    }
     Start-Sleep -Milliseconds 100
-    $fg = Get-ForegroundWindowTitle
-    if ($fg -and ($fg -eq $Title -or $fg -like "$Title*")) { return $true }
+    $fg = Get-ForegroundWindowInfo
+    if ($ConsolePid -gt 0 -and (Test-RelatedProcess -A ([int]$fg.pid) -B $ConsolePid)) { return $true }
+    if ($Title -and $fg.title -and ($fg.title -eq $Title -or $fg.title -like "$Title*" -or $fg.title -like "*$Title*")) { return $true }
   }
   return $false
 }
@@ -514,6 +566,10 @@ function Send-CodexConsolePrompt {
   Add-Type -AssemblyName System.Windows.Forms
   $shell = New-Object -ComObject WScript.Shell
   $ok = $false
+  $consolePid = 0
+  if ($state.codex_console_pid) {
+    try { $consolePid = [int]$state.codex_console_pid } catch { $consolePid = 0 }
+  }
   if ($state.codex_console_pid) {
     try { $ok = $shell.AppActivate([int]$state.codex_console_pid) } catch { $ok = $false }
   }
@@ -523,12 +579,15 @@ function Send-CodexConsolePrompt {
     Start-Sleep -Seconds $cfg.CodexStartWaitSec
     if ($state.codex_console_pid) {
       try { $ok = $shell.AppActivate([int]$state.codex_console_pid) } catch { $ok = $false }
+      try { $consolePid = [int]$state.codex_console_pid } catch { $consolePid = 0 }
     }
     if (-not $ok) { $ok = $shell.AppActivate($cfg.CodexWindowTitle) }
   }
   if (-not $ok) { throw "Codex window not found: $($cfg.CodexWindowTitle)" }
-  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 10)) {
-    throw "Codex window not foreground: $($cfg.CodexWindowTitle)"
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 10 -ConsolePid $consolePid)) {
+    $fg = Get-ForegroundWindowInfo
+    $fgLabel = if ($fg.process) { "$($fg.process)#$($fg.pid)" } elseif ($fg.pid) { "pid=$($fg.pid)" } else { 'unknown' }
+    throw "Codex window not foreground: $($cfg.CodexWindowTitle) (foreground=$fgLabel title='$($fg.title)')"
   }
 
   if ($state.codex_console_offset -eq 0 -and (Test-Path -LiteralPath $cfg.CodexTranscript)) {
@@ -545,13 +604,13 @@ function Send-CodexConsolePrompt {
       if ($proc -and $proc.ProcessName -match '^(windowsterminal|wt)$') { $sendMethod = 'sendkeys' }
     } catch {}
   }
-  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3)) {
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3 -ConsolePid $consolePid)) {
     throw "Codex window focus lost before input."
   }
   if (-not (Send-ConsoleInputText -Text $Prompt -Method $sendMethod)) {
     throw 'Failed to send console prompt text.'
   }
-  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3)) {
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3 -ConsolePid $consolePid)) {
     throw "Codex window focus lost before submit."
   }
   Send-KeyCombo -Combo $cfg.CodexSendKey -Method $sendMethod
