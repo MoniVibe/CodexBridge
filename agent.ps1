@@ -565,7 +565,7 @@ function Append-SessionInfo {
 
   $perms = $null
   if ($state.PSObject.Properties.Name -contains 'codex_last_perms' -and $state.codex_last_perms) { $perms = $state.codex_last_perms }
-  if (-not $perms) { $perms = (if ($cfg.CodexDangerous) { 'full' } else { 'restricted' }) }
+  if (-not $perms) { $perms = if ($cfg.CodexDangerous) { 'full' } else { 'restricted' } }
   $agentName = $cfg.Name
   $machineName = $env:COMPUTERNAME
   $agentLabel = if ($agentName -and $machineName -and ($agentName -ne $machineName)) { "$agentName@$machineName" }
@@ -1030,7 +1030,7 @@ function Refresh-CodexJobState {
         if ($res.model) { $state.codex_last_model = [string]$res.model }
         if ($res.reasoning_effort) { $state.codex_last_reasoning_effort = [string]$res.reasoning_effort }
         if ($res.working_dir) { $state.codex_last_cwd = [string]$res.working_dir }
-        if ($res.dangerous -ne $null) { $state.codex_last_perms = (if ([bool]$res.dangerous) { 'full' } else { 'restricted' }) }
+        if ($res.dangerous -ne $null) { $state.codex_last_perms = if ([bool]$res.dangerous) { 'full' } else { 'restricted' } }
       }
     } catch {}
   }
