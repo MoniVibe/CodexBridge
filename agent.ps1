@@ -1382,29 +1382,46 @@ function Refresh-CodexJobState {
   }
 
   # Promote run metadata from the result json when available, so the appended suffix is accurate.
+  $resultObj = $null
   if ($state.PSObject.Properties.Name -contains 'codex_job_result' -and $state.codex_job_result -and (Test-Path -LiteralPath $state.codex_job_result)) {
     try {
-      $res = Get-Content -LiteralPath $state.codex_job_result -Raw | ConvertFrom-Json
-      if ($res) {
-        if ($res.model) { $state.codex_last_model = [string]$res.model }
-        if ($res.reasoning_effort) { $state.codex_last_reasoning_effort = [string]$res.reasoning_effort }
-        if ($res.working_dir) { $state.codex_last_cwd = [string]$res.working_dir }
-        if ($res.dangerous -ne $null) { $state.codex_last_perms = if ([bool]$res.dangerous) { 'full' } else { 'restricted' } }
+      $resultObj = Get-Content -LiteralPath $state.codex_job_result -Raw | ConvertFrom-Json
+      if ($resultObj) {
+        if ($resultObj.model) { $state.codex_last_model = [string]$resultObj.model }
+        if ($resultObj.reasoning_effort) { $state.codex_last_reasoning_effort = [string]$resultObj.reasoning_effort }
+        if ($resultObj.working_dir) { $state.codex_last_cwd = [string]$resultObj.working_dir }
+        if ($resultObj.dangerous -ne $null) { $state.codex_last_perms = if ([bool]$resultObj.dangerous) { 'full' } else { 'restricted' } }
       }
     } catch {}
   }
 
   $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
-  if (-not $state.codex_last_log -or ($state.codex_last_log -ne $finalLog) -or -not (Test-Path -LiteralPath $finalLog)) {
-    $output = $null
-    if ($outFile -and (Test-Path -LiteralPath $outFile)) {
-      $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
-    }
-    if (-not $output) { $output = '(no output)' }
-    $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
-    try { Set-Content -LiteralPath $finalLog -Value $output } catch {}
-    $state.codex_last_log = $finalLog
+  $output = $null
+  if ($outFile -and (Test-Path -LiteralPath $outFile)) {
+    $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
   }
+  if ($output) { $output = $output.Trim() }
+
+  if (-not $output -and $resultObj -and ($resultObj.ok -eq $false)) {
+    $err = if ($resultObj.error) { [string]$resultObj.error } else { 'unknown error' }
+    $ended = ''
+    if ($resultObj.ended) { $ended = " ended=$($resultObj.ended)" }
+    $code = ''
+    if ($resultObj.exit_code -ne $null) { $code = " exit_code=$($resultObj.exit_code)" }
+    $output = "Codex job failed: $err.$code$ended"
+  }
+
+  if (-not $output -and $state.PSObject.Properties.Name -contains 'codex_job_stderr' -and $state.codex_job_stderr -and (Test-Path -LiteralPath $state.codex_job_stderr)) {
+    $stderrTail = Get-LogTail -LogPath $state.codex_job_stderr -Lines 40
+    if ($stderrTail) { $stderrTail = $stderrTail.Trim() }
+    if ($stderrTail) {
+      $output = "(no stdout)`n`n--- stderr (tail) ---`n$stderrTail"
+    }
+  }
+  if (-not $output) { $output = '(no output)' }
+  $output = Append-SessionInfo -cfg $cfg -state $state -Text $output
+  try { Set-Content -LiteralPath $finalLog -Value $output } catch {}
+  $state.codex_last_log = $finalLog
 
   # Clear PID so we don't treat the job as running again after it exits.
   $state.codex_job_pid = $null
