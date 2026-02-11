@@ -28,21 +28,57 @@ try {
 function Is-RunningByScript {
   param([string]$ScriptName, [string]$ConfigPath)
   try {
-    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match [regex]::Escape($ScriptName) }
-    if ($ConfigPath) {
-      $procs = $procs | Where-Object { $_.CommandLine -match [regex]::Escape($ConfigPath) }
+    $filePattern = '(?i)(?:^|\s)-File\s+("([^"]+)"|''([^'']+)''|(\S+))'
+    $cfgPattern = '(?i)(?:^|\s)-ConfigPath\s+("([^"]+)"|''([^'']+)''|(\S+))'
+    $procs = Get-CimInstance Win32_Process | Where-Object {
+      if (-not $_.CommandLine) { return $false }
+      if ($_.Name -notin @('pwsh.exe', 'powershell.exe')) { return $false }
+
+      $fileOk = $false
+      $fileMatches = [regex]::Matches($_.CommandLine, $filePattern)
+      foreach ($m in $fileMatches) {
+        $candidate = $m.Groups[2].Value
+        if (-not $candidate) { $candidate = $m.Groups[3].Value }
+        if (-not $candidate) { $candidate = $m.Groups[4].Value }
+        if ($candidate -and $candidate.Trim() -ieq $ScriptName) {
+          $fileOk = $true
+          break
+        }
+      }
+      if (-not $fileOk) { return $false }
+
+      if (-not $ConfigPath) { return $true }
+
+      $cfgMatches = [regex]::Matches($_.CommandLine, $cfgPattern)
+      foreach ($m in $cfgMatches) {
+        $candidate = $m.Groups[2].Value
+        if (-not $candidate) { $candidate = $m.Groups[3].Value }
+        if (-not $candidate) { $candidate = $m.Groups[4].Value }
+        if ($candidate -and $candidate.Trim() -ieq $ConfigPath) {
+          return $true
+        }
+      }
+      return $false
     }
     return ($procs | Select-Object -First 1)
   } catch { return $null }
 }
 
 function Ensure-Process {
-  param([string]$Label, [string]$ScriptPath, [string[]]$Args, [string]$ConfigPath)
+  param([string]$Label, [string]$ScriptPath, [string[]]$LaunchArgs, [string]$ConfigPath)
   $running = Is-RunningByScript -ScriptName $ScriptPath -ConfigPath $ConfigPath
   if ($running) { return $false }
   try {
-    Start-Process -FilePath pwsh -ArgumentList $Args -WorkingDirectory $repoDir -WindowStyle Hidden | Out-Null
-    Write-Log "Started $Label"
+    $stdoutPath = Join-Path $repoDir ("logs\watchdog_{0}.stdout.log" -f $Label)
+    $stderrPath = Join-Path $repoDir ("logs\watchdog_{0}.stderr.log" -f $Label)
+    $proc = Start-Process -FilePath pwsh -ArgumentList $LaunchArgs -WorkingDirectory $repoDir -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+    Start-Sleep -Milliseconds 800
+    try { $proc.Refresh() } catch {}
+    if ($proc.HasExited) {
+      Write-Log "Launch for $Label exited quickly (pid=$($proc.Id), exit=$($proc.ExitCode)). stderr=$stderrPath"
+      return $false
+    }
+    Write-Log "Started $Label (pid=$($proc.Id))"
     return $true
   } catch {
     Write-Log "Failed to start ${Label}: $($_.Exception.Message)"
@@ -56,32 +92,13 @@ $consoleEnv = Join-Path $repoDir 'agent_console.env'
 
 Write-Log 'Watchdog started.'
 
-$lastStart = @{
-  agent = Get-Date '1900-01-01'
-  agent_console = Get-Date '1900-01-01'
-  broker = Get-Date '1900-01-01'
-}
-
 while ($true) {
-  if (((Get-Date) - $lastStart.agent).TotalSeconds -ge 60) {
-    if (Ensure-Process -Label 'agent' -ScriptPath $agentScript -Args @('-NoProfile','-File', $agentScript)) {
-      $lastStart.agent = Get-Date
-    }
+  Ensure-Process -Label 'agent' -ScriptPath $agentScript -LaunchArgs @('-NoProfile','-File', $agentScript) | Out-Null
+
+  if (Test-Path -LiteralPath $consoleEnv) {
+    Ensure-Process -Label 'agent_console' -ScriptPath $agentScript -LaunchArgs @('-NoProfile','-File', $agentScript, '-ConfigPath', $consoleEnv) -ConfigPath $consoleEnv | Out-Null
   }
-  if (((Get-Date) - $lastStart.agent_console).TotalSeconds -ge 60) {
-    if (Test-Path -LiteralPath $consoleEnv) {
-      if (Ensure-Process -Label 'agent_console' -ScriptPath $agentScript -Args @('-NoProfile','-File', $agentScript, '-ConfigPath', $consoleEnv) -ConfigPath $consoleEnv) {
-        $lastStart.agent_console = Get-Date
-      }
-    } else {
-      # No console config present; don't spam restarts.
-      $lastStart.agent_console = Get-Date
-    }
-  }
-  if (((Get-Date) - $lastStart.broker).TotalSeconds -ge 60) {
-    if (Ensure-Process -Label 'broker' -ScriptPath $brokerScript -Args @('-NoProfile','-File', $brokerScript)) {
-      $lastStart.broker = Get-Date
-    }
-  }
+
+  Ensure-Process -Label 'broker' -ScriptPath $brokerScript -LaunchArgs @('-NoProfile','-File', $brokerScript) | Out-Null
   Start-Sleep -Seconds $IntervalSec
 }
