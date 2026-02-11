@@ -345,6 +345,7 @@ function Send-KeyCombo {
     'alt+enter'  = '%{ENTER}'
     'ctrl+d'     = '^d'
     'ctrl+z'     = '^z'
+    'ctrl+v'     = '^v'
   }
 
   if ($method -eq 'sendkeys') {
@@ -425,6 +426,9 @@ public static class NativeInput {
     'ctrl+z' {
       $keys = @(0x11, 0x5A)
     }
+    'ctrl+v' {
+      $keys = @(0x11, 0x56)
+    }
     default {
       $keys = @(0x0D)
     }
@@ -439,6 +443,66 @@ public static class NativeInput {
   $fallbackSeq = $sendKeysMap[$combo]
   if (-not $fallbackSeq) { $fallbackSeq = '{ENTER}' }
   [System.Windows.Forms.SendKeys]::SendWait($fallbackSeq)
+}
+
+function Get-ForegroundWindowTitle {
+  if (-not ('NativeWindowUtil' -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NativeWindowUtil {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+}
+"@
+  }
+  try {
+    $h = [NativeWindowUtil]::GetForegroundWindow()
+    if ($h -eq [IntPtr]::Zero) { return '' }
+    $sb = New-Object System.Text.StringBuilder 512
+    $null = [NativeWindowUtil]::GetWindowText($h, $sb, $sb.Capacity)
+    return $sb.ToString()
+  } catch { return '' }
+}
+
+function Ensure-WindowForeground {
+  param($shell, [string]$Title, [int]$Attempts = 8)
+  if (-not $Title) { return $false }
+  for ($i = 0; $i -lt $Attempts; $i++) {
+    try { $null = $shell.AppActivate($Title) } catch {}
+    Start-Sleep -Milliseconds 100
+    $fg = Get-ForegroundWindowTitle
+    if ($fg -and ($fg -eq $Title -or $fg -like "$Title*")) { return $true }
+  }
+  return $false
+}
+
+function Send-ConsoleInputText {
+  param([string]$Text, [string]$Method)
+  if (-not $Text) { return $true }
+  try {
+    $old = $null
+    $hadOld = $false
+    try {
+      $old = Get-Clipboard -Raw -ErrorAction Stop
+      $hadOld = $true
+    } catch {}
+    try {
+      Set-Clipboard -Value $Text
+      Send-KeyCombo -Combo 'ctrl+v' -Method $Method
+      return $true
+    } finally {
+      if ($hadOld) { try { Set-Clipboard -Value $old } catch {} }
+    }
+  } catch {}
+  try {
+    [System.Windows.Forms.SendKeys]::SendWait($Text)
+    return $true
+  } catch {}
+  return $false
 }
 
 function Send-CodexConsolePrompt {
@@ -463,6 +527,9 @@ function Send-CodexConsolePrompt {
     if (-not $ok) { $ok = $shell.AppActivate($cfg.CodexWindowTitle) }
   }
   if (-not $ok) { throw "Codex window not found: $($cfg.CodexWindowTitle)" }
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 10)) {
+    throw "Codex window not foreground: $($cfg.CodexWindowTitle)"
+  }
 
   if ($state.codex_console_offset -eq 0 -and (Test-Path -LiteralPath $cfg.CodexTranscript)) {
     $state.codex_console_offset = (Get-Item -LiteralPath $cfg.CodexTranscript).Length
@@ -470,7 +537,6 @@ function Send-CodexConsolePrompt {
   }
 
   Start-Sleep -Milliseconds 200
-  [System.Windows.Forms.SendKeys]::SendWait($Prompt)
   $sendMethod = $cfg.CodexSendKeyMethod
   if (-not $sendMethod -or $sendMethod -eq 'auto') {
     $sendMethod = 'sendinput'
@@ -479,9 +545,21 @@ function Send-CodexConsolePrompt {
       if ($proc -and $proc.ProcessName -match '^(windowsterminal|wt)$') { $sendMethod = 'sendkeys' }
     } catch {}
   }
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3)) {
+    throw "Codex window focus lost before input."
+  }
+  if (-not (Send-ConsoleInputText -Text $Prompt -Method $sendMethod)) {
+    throw 'Failed to send console prompt text.'
+  }
+  if (-not (Ensure-WindowForeground -shell $shell -Title $cfg.CodexWindowTitle -Attempts 3)) {
+    throw "Codex window focus lost before submit."
+  }
   Send-KeyCombo -Combo $cfg.CodexSendKey -Method $sendMethod
 
   $sentAt = Get-Date
+  Ensure-StateProperty -state $state -Name 'codex_console_last_prompt_at' -Value $null
+  $state.codex_console_last_prompt_at = $sentAt.ToString('o')
+  Save-State -cfg $cfg -state $state
   $rolloutSessionId = $null
   if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) {
     $rolloutSessionId = [string]$state.codex_session_id
@@ -685,6 +763,7 @@ function Load-State {
       Ensure-StateProperty -state $obj -Name 'codex_session_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_console_offset' -Value 0
       Ensure-StateProperty -state $obj -Name 'codex_console_pid' -Value $null
+      Ensure-StateProperty -state $obj -Name 'codex_console_last_prompt_at' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_cwd' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_model' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_reasoning_effort' -Value $null
@@ -714,6 +793,7 @@ function Load-State {
     codex_session_id = $null
     codex_console_offset = 0
     codex_console_pid = $null
+    codex_console_last_prompt_at = $null
     codex_cwd = $null
     codex_model = $null
     codex_reasoning_effort = $null
@@ -1782,12 +1862,22 @@ while ($true) {
           if ($cleanTail) {
             $tail = $cleanTail
           } else {
+            $tail = '(no output yet)'
             $sid = $null
             if ($state.PSObject.Properties.Name -contains 'codex_session_id' -and $state.codex_session_id) { $sid = [string]$state.codex_session_id }
             if (-not $sid) { $sid = Resolve-CodexSessionFromRollout -StartTime (Get-Date).AddMinutes(-30) -EndTime (Get-Date) }
             if ($sid) {
               $snap = Get-LatestAssistantTextFromRollout -SessionId $sid
-              if ($snap.text) { $tail = $snap.text }
+              $promptAt = $null
+              if ($state.PSObject.Properties.Name -contains 'codex_console_last_prompt_at' -and $state.codex_console_last_prompt_at) {
+                try { $promptAt = [datetime]$state.codex_console_last_prompt_at } catch { $promptAt = $null }
+              }
+              $fresh = $true
+              if ($promptAt) {
+                if ($snap.timestamp) { $fresh = ([datetime]$snap.timestamp -ge $promptAt.AddSeconds(-1)) }
+                else { $fresh = $false }
+              }
+              if ($snap.text -and $fresh) { $tail = $snap.text }
             }
           }
           $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
