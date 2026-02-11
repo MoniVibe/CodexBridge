@@ -481,16 +481,35 @@ function Send-CodexConsolePrompt {
   }
   Send-KeyCombo -Combo $cfg.CodexSendKey -Method $sendMethod
 
-  Start-Sleep -Seconds $cfg.CodexWaitSec
-
   $offset = 0
   if ($state.codex_console_offset) { $offset = [long]$state.codex_console_offset }
-  $delta = Read-LogDelta -Path $cfg.CodexTranscript -Offset $offset
-  $state.codex_console_offset = $delta.newOffset
+  $maxWaitMs = [Math]::Max(2000, [int]$cfg.CodexWaitSec * 1000)
+  $idleSettleMs = 1200
+  $pollMs = 250
+  $deadline = (Get-Date).AddMilliseconds($maxWaitMs)
+  $raw = ''
+  $lastCleanAt = $null
+
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds $pollMs
+    $delta = Read-LogDelta -Path $cfg.CodexTranscript -Offset $offset
+    if ($delta.newOffset -ne $offset) {
+      $offset = $delta.newOffset
+      if ($delta.text) {
+        if ($raw) { $raw += "`n" }
+        $raw += $delta.text
+        $chunk = Clean-TranscriptText -Text $delta.text
+        if ($chunk) { $lastCleanAt = Get-Date }
+      }
+    }
+    if ($lastCleanAt -and (((Get-Date) - $lastCleanAt).TotalMilliseconds -ge $idleSettleMs)) { break }
+  }
+
+  $state.codex_console_offset = $offset
   Save-State -cfg $cfg -state $state
 
-  if (-not $delta.text) { return '(no output yet)' }
-  $clean = Clean-TranscriptText -Text $delta.text
+  if (-not $raw) { return '(no output yet)' }
+  $clean = Clean-TranscriptText -Text $raw
   if (-not $clean) { return '(sent; no output yet)' }
   return $clean
 }
