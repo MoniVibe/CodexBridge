@@ -580,8 +580,35 @@ function Append-SessionInfo {
 function Ensure-SessionInfoSuffix {
   param($cfg, $state, [string]$Text)
   if (-not $cfg.CodexAppendSession) { return $Text }
-  if ($Text -match '(^|\n)\\[telebot\\] codex_session_id:') { return $Text }
-  return (Append-SessionInfo -cfg $cfg -state $state -Text $Text)
+
+  if (-not $Text) { return $Text }
+
+  # If we ever accidentally appended twice, drop the duplicate (only if the last two non-empty lines are identical suffixes).
+  $trimmed = $Text.TrimEnd()
+  $lines = $trimmed -split "`r?`n"
+  $iLast = $lines.Length - 1
+  while ($iLast -ge 0 -and $lines[$iLast].Trim() -eq '') { $iLast-- }
+  $iPrev = $iLast - 1
+  while ($iPrev -ge 0 -and $lines[$iPrev].Trim() -eq '') { $iPrev-- }
+  if ($iLast -ge 0 -and $iPrev -ge 0) {
+    if ($lines[$iLast] -match '^\\[telebot\\] codex_session_id:' -and $lines[$iPrev] -match '^\\[telebot\\] codex_session_id:') {
+      if ($lines[$iLast] -eq $lines[$iPrev]) {
+        $kept = New-Object System.Collections.Generic.List[string]
+        for ($j = 0; $j -le $iLast; $j++) {
+          if ($j -eq $iPrev) { continue }
+          if ($j -gt $iPrev -and $j -lt $iLast -and $lines[$j].Trim() -eq '') { continue }
+          $kept.Add($lines[$j])
+        }
+        $trimmed = ($kept -join "`n")
+        $lines = $trimmed -split "`r?`n"
+      }
+    }
+  }
+
+  # Already has suffix (with either LF or CRLF)? Keep as-is.
+  if ($trimmed -match '(^|\r?\n)\[telebot\] codex_session_id:') { return $trimmed }
+
+  return (Append-SessionInfo -cfg $cfg -state $state -Text $trimmed)
 }
 
 function Get-LogTail {
