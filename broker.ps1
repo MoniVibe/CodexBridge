@@ -1292,6 +1292,12 @@ $state = Load-State -cfg $cfg
 Write-BotLog -Path $cfg.BotLog -Message 'Broker started.'
 Write-Console ("Broker up. default_target={0} targets={1} poll_timeout={2}s log={3}" -f $cfg.DefaultTarget, $cfg.Targets.Count, $cfg.PollTimeoutSec, $cfg.BotLog)
 
+try {
+  $logs = Join-Path $PSScriptRoot 'logs'
+  New-Item -ItemType Directory -Force -Path $logs | Out-Null
+  Set-Content -LiteralPath (Join-Path $logs 'broker.pid') -Value $PID
+} catch {}
+
 Ensure-SingleBroker -cfg $cfg
 Clear-TgWebhook -cfg $cfg -Reason 'startup'
 

@@ -50,13 +50,27 @@ function Get-EnvValueFromFile {
 }
 
 function Restart-ByScriptPath {
-  param([string]$ScriptPath)
+  param([string]$ScriptPath, [string]$PidFile = $null)
   if (-not (Test-Path -LiteralPath $ScriptPath)) { return }
 
-  $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$ScriptPath*" }
-  foreach ($p in $procs) {
-    try { Stop-Process -Id $p.ProcessId -Force } catch {}
+  # Prefer PID files over WMI/CIM (CommandLine queries can hang when the machine is under process thrash).
+  if ($PidFile -and (Test-Path -LiteralPath $PidFile)) {
+    try {
+      $pidText = (Get-Content -LiteralPath $PidFile -Raw -ErrorAction Stop).Trim()
+      $procId = 0
+      if ([int]::TryParse($pidText, [ref]$procId) -and $procId -gt 0) {
+        try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+      }
+    } catch {}
   }
+
+  # Best-effort fallback: attempt a bounded CIM scan.
+  try {
+    $procs = Get-CimInstance Win32_Process -OperationTimeoutSec 2 | Where-Object { $_.CommandLine -like "*$ScriptPath*" }
+    foreach ($p in $procs) {
+      try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    }
+  } catch {}
 
   $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
   if (-not $pwsh) { $pwsh = (Get-Command powershell -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1) }
@@ -146,11 +160,28 @@ if ($runBroker -and -not $allowBroker) {
 
 # If this machine should not run the broker, stop any stray broker instance to avoid Telegram 409 conflicts.
 if (-not $runBroker) {
-  $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$brokerScript*" }
-  foreach ($p in $procs) {
-    try { Stop-Process -Id $p.ProcessId -Force } catch {}
+  $logs = Join-Path $RepoDir 'logs'
+  $pidFile = Join-Path $logs 'broker.pid'
+  if (Test-Path -LiteralPath $pidFile) {
+    try {
+      $pidText = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction Stop).Trim()
+      $procId = 0
+      if ([int]::TryParse($pidText, [ref]$procId) -and $procId -gt 0) {
+        try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+      }
+    } catch {}
   }
 }
 
-if ($runBroker) { Restart-ByScriptPath -ScriptPath $brokerScript }
-if ($runAgent) { Restart-ByScriptPath -ScriptPath $agentScript }
+$logs = Join-Path $RepoDir 'logs'
+try { New-Item -ItemType Directory -Force -Path $logs | Out-Null } catch {}
+$brokerPidFile = Join-Path $logs 'broker.pid'
+$agentPort = 8765
+try {
+  $p = Get-EnvValueFromFile -Path $agentEnv -Key 'LISTEN_PORT'
+  if ($p -and $p -match '^\\d+$') { $agentPort = [int]$p }
+} catch {}
+$agentPidFile = Join-Path $logs ("agent_{0}.pid" -f $agentPort)
+
+if ($runBroker) { Restart-ByScriptPath -ScriptPath $brokerScript -PidFile $brokerPidFile }
+if ($runAgent) { Restart-ByScriptPath -ScriptPath $agentScript -PidFile $agentPidFile }

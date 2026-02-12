@@ -1681,6 +1681,12 @@ function List-CodexSessions {
 $cfg = Get-Config -ConfigPath $ConfigPath
 $state = Load-State -cfg $cfg
 
+try {
+  New-Item -ItemType Directory -Force -Path $cfg.LogDir | Out-Null
+  $pidFile = Join-Path $cfg.LogDir ("agent_{0}.pid" -f $cfg.ListenPort)
+  Set-Content -LiteralPath $pidFile -Value $PID
+} catch {}
+
 if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_session_id) {
   try {
     if ($cfg.CodexAsync) {
