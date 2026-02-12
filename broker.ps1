@@ -755,6 +755,7 @@ function Handle-Command {
     'session' = 'codexsession'
     'agent'   = 'codex'
     'console' = 'codexconsole'
+    'skill'   = 'skills'
   }
   if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
 
@@ -779,13 +780,26 @@ function Handle-Command {
 
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | skills list|info <name>|doctor|run <name> [args...] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
     'status' {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'ping' }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'skills' {
+      if (-not $rest) { $rest = 'list' }
+      $skillsScript = Join-Path $PSScriptRoot 'skills.ps1'
+      $scriptArg = '"' + ($skillsScript -replace '"','""') + '"'
+      $cmdText = ('pwsh -NoProfile -ExecutionPolicy Bypass -File {0} {1}' -f $scriptArg, $rest).Trim()
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'run'; cmd = $cmdText }
+      if ($resp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text "Job queued: $($resp.result.job_id)"
+      } else {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      }
       return
     }
     'run' {

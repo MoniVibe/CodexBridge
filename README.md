@@ -55,6 +55,7 @@ Target prefix is optional:
 - `[<target>] codexuse <thread_id>`: resume a specific thread id (alias: `codexresume`)
 - `[<target>] codexreset`: clear stored thread id
 - `[<target>] status`: show agent status
+- `[<target>] skills list|info <name>|doctor|run <name> [args...]`: run/manage local Codex skills (reads from `C:\Users\<you>\.codex\skills`)
 
 Default: if the message does not start with a known command/target, it is treated as:
 `<DEFAULT_TARGET> codex <text>`.
