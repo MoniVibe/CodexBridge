@@ -11,6 +11,25 @@ $script:BrokerMutex = $null
 $script:LastWebhookClear = Get-Date '1900-01-01'
 $script:Consecutive409 = 0
 $script:Last409At = $null
+$script:LastMessageAt = $null
+$script:LastHeartbeatAt = Get-Date '1900-01-01'
+
+function Is-Truthy {
+  param([string]$Value)
+  if (-not $Value) { return $false }
+  return ($Value.Trim() -match '^(1|true|yes|y|on)$')
+}
+
+$script:TelebotQuiet = $false
+if (Is-Truthy -Value $env:TELEBOT_QUIET) { $script:TelebotQuiet = $true }
+if (Is-Truthy -Value $env:BROKER_QUIET) { $script:TelebotQuiet = $true }
+
+function Write-Console {
+  param([string]$Text)
+  if ($script:TelebotQuiet) { return }
+  if (-not $Text) { return }
+  try { Write-Host $Text } catch {}
+}
 
 function Import-DotEnv {
   param([string]$Path)
@@ -55,6 +74,7 @@ function Get-Config {
     ExitOn409 = $true
     ExitOn409Threshold = 3
     ConsoleFallbackExec = $false
+    ConsoleHeartbeatSec = 0
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -79,6 +99,8 @@ function Get-Config {
   if ($env:BROKER_EXIT_ON_409_THRESHOLD) { $cfg.ExitOn409Threshold = [int]$env:BROKER_EXIT_ON_409_THRESHOLD }
   if ($env:CONSOLE_FALLBACK_EXEC) { $cfg.ConsoleFallbackExec = ($env:CONSOLE_FALLBACK_EXEC -match '^(1|true|yes)$') }
   if ($env:BROKER_STATE_FILE) { $cfg.StateFile = $env:BROKER_STATE_FILE }
+  if ($env:BROKER_HEARTBEAT_SEC) { $cfg.ConsoleHeartbeatSec = [int]$env:BROKER_HEARTBEAT_SEC }
+  elseif ($env:TELEBOT_HEARTBEAT_SEC) { $cfg.ConsoleHeartbeatSec = [int]$env:TELEBOT_HEARTBEAT_SEC }
 
   $all = [System.Environment]::GetEnvironmentVariables()
   foreach ($key in $all.Keys) {
@@ -614,7 +636,7 @@ function Ensure-SingleBroker {
   if (-not $mutex) { $mutex = Acquire-BrokerMutex -Name 'Local\CodexBridgeBroker' }
   if (-not $mutex) {
     Write-BotLog -Path $cfg.BotLog -Message 'Broker already running. Exiting.'
-    Write-Host 'Broker already running. Exiting.'
+    Write-Console 'Broker already running. Exiting.'
     exit 1
   }
   $script:BrokerMutex = $mutex
@@ -1268,6 +1290,7 @@ function Handle-Command {
 $cfg = Get-Config -ConfigPath $ConfigPath
 $state = Load-State -cfg $cfg
 Write-BotLog -Path $cfg.BotLog -Message 'Broker started.'
+Write-Console ("Broker up. default_target={0} targets={1} poll_timeout={2}s log={3}" -f $cfg.DefaultTarget, $cfg.Targets.Count, $cfg.PollTimeoutSec, $cfg.BotLog)
 
 Ensure-SingleBroker -cfg $cfg
 Clear-TgWebhook -cfg $cfg -Reason 'startup'
@@ -1313,12 +1336,13 @@ while ($true) {
   $updates = Get-TgUpdates -cfg $cfg -Offset $offset
   if ($cfg.ExitOn409 -and $script:Consecutive409 -ge $cfg.ExitOn409Threshold) {
     Write-BotLog -Path $cfg.BotLog -Message "Exiting after $($script:Consecutive409) consecutive 409 conflicts (another broker is polling this bot)."
-    Write-Host "Broker exiting: another broker is polling this bot (409 conflict)."
+    Write-Console "Broker exiting: another broker is polling this bot (409 conflict)."
     exit 2
   }
 
   if ($updates.ok -and $updates.result) {
     foreach ($update in $updates.result) {
+      $script:LastMessageAt = Get-Date
       $offset = [int]$update.update_id + 1
       try { $state.last_update_id = $offset } catch { Ensure-StateProperty -state $state -Name 'last_update_id' -Value $offset; try { $state.last_update_id = $offset } catch {} }
       Save-State -cfg $cfg -state $state
@@ -1370,6 +1394,20 @@ while ($true) {
         Write-BotLog -Path $cfg.BotLog -Message "Handle-Command failed: $($_.Exception.Message)"
         Send-TgMessage -cfg $cfg -ChatId $chatId -Text 'Command failed. Check broker.log.'
       }
+    }
+  }
+
+  # Optional console heartbeat (for visible console runs). Off by default.
+  if ($cfg.ConsoleHeartbeatSec -gt 0) {
+    $now = Get-Date
+    if ((($now - $script:LastHeartbeatAt).TotalSeconds) -ge $cfg.ConsoleHeartbeatSec) {
+      $pendingCount = 0
+      try { $pendingCount = @($state.pending_codex_jobs).Count } catch { $pendingCount = 0 }
+      $last = if ($script:LastMessageAt) { $script:LastMessageAt.ToString('HH:mm:ss') } else { 'never' }
+      $off = 0
+      try { $off = [int]$state.last_update_id } catch { $off = 0 }
+      Write-Console ("[{0}] heartbeat: last_msg={1} pending={2} offset={3} 409s={4}" -f $now.ToString('HH:mm:ss'), $last, $pendingCount, $off, $script:Consecutive409)
+      $script:LastHeartbeatAt = $now
     }
   }
 }

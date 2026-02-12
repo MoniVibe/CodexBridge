@@ -66,7 +66,26 @@ function Restart-ByScriptPath {
   if ($env:TELEBOT_VISIBLE) { $visible = ($env:TELEBOT_VISIBLE -match '^(1|true|yes)$') }
   $ws = if ($visible) { 'Normal' } else { 'Hidden' }
 
-  Start-Process -FilePath $pwsh -WorkingDirectory $RepoDir -WindowStyle $ws -ArgumentList @('-NoProfile','-File', $ScriptPath)
+  $logs = Join-Path $RepoDir 'logs'
+  try { New-Item -ItemType Directory -Force -Path $logs | Out-Null } catch {}
+  $base = [System.IO.Path]::GetFileNameWithoutExtension($ScriptPath)
+  $stdout = Join-Path $logs "${base}.service.stdout.log"
+  $stderr = Join-Path $logs "${base}.service.stderr.log"
+
+  $p = @{
+    FilePath = $pwsh
+    WorkingDirectory = $RepoDir
+    WindowStyle = $ws
+    ArgumentList = @('-NoProfile','-File', $ScriptPath)
+  }
+
+  # When running hidden/background, redirect stdout/stderr so no console windows or hangs.
+  if (-not $visible) {
+    $p.RedirectStandardOutput = $stdout
+    $p.RedirectStandardError = $stderr
+  }
+
+  Start-Process @p | Out-Null
 }
 
 $legacyBotScript = Join-Path $RepoDir 'bot.ps1'

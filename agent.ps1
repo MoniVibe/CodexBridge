@@ -6,6 +6,27 @@ $ErrorActionPreference = 'Stop'
 
 try { $Host.UI.RawUI.WindowTitle = 'TelebotAgent' } catch {}
 
+function Is-Truthy {
+  param([string]$Value)
+  if (-not $Value) { return $false }
+  return ($Value.Trim() -match '^(1|true|yes|y|on)$')
+}
+
+$script:TelebotQuiet = $false
+if (Is-Truthy -Value $env:TELEBOT_QUIET) { $script:TelebotQuiet = $true }
+if (Is-Truthy -Value $env:AGENT_QUIET) { $script:TelebotQuiet = $true }
+
+$script:ConsoleLogRequests = $false
+if (Is-Truthy -Value $env:TELEBOT_ACTIVITY) { $script:ConsoleLogRequests = $true }
+if (Is-Truthy -Value $env:AGENT_LOG_REQUESTS) { $script:ConsoleLogRequests = $true }
+
+function Write-Console {
+  param([string]$Text)
+  if ($script:TelebotQuiet) { return }
+  if (-not $Text) { return }
+  try { Write-Host $Text } catch {}
+}
+
 function Import-DotEnv {
   param([string]$Path)
   if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -1675,7 +1696,7 @@ if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse($cfg.ListenAddr), $cfg.ListenPort)
 $listener.Start()
 
-Write-Host "Agent $($cfg.Name) listening on $($cfg.ListenAddr):$($cfg.ListenPort)"
+Write-Console ("Agent up. name={0} listen={1}:{2} log_dir={3} state={4}" -f $cfg.Name, $cfg.ListenAddr, $cfg.ListenPort, $cfg.LogDir, $cfg.StateFile)
 
 while ($true) {
   $client = $listener.AcceptTcpClient()
@@ -1692,6 +1713,10 @@ while ($true) {
   try {
     if (-not $line) { throw 'Empty request.' }
     $req = $line | ConvertFrom-Json
+
+    if ($script:ConsoleLogRequests -and $req -and $req.op) {
+      Write-Console ("[{0}] req op={1}" -f (Get-Date).ToString('HH:mm:ss'), [string]$req.op)
+    }
 
     if ($cfg.Secret -and $req.secret -ne $cfg.Secret) { throw 'Unauthorized.' }
 
