@@ -1681,12 +1681,6 @@ function List-CodexSessions {
 $cfg = Get-Config -ConfigPath $ConfigPath
 $state = Load-State -cfg $cfg
 
-try {
-  New-Item -ItemType Directory -Force -Path $cfg.LogDir | Out-Null
-  $pidFile = Join-Path $cfg.LogDir ("agent_{0}.pid" -f $cfg.ListenPort)
-  Set-Content -LiteralPath $pidFile -Value $PID
-} catch {}
-
 if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_session_id) {
   try {
     if ($cfg.CodexAsync) {
@@ -1701,6 +1695,12 @@ if ($cfg.CodexMode -ne 'console' -and $cfg.CodexAutoInit -and -not $state.codex_
 
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse($cfg.ListenAddr), $cfg.ListenPort)
 $listener.Start()
+
+try {
+  New-Item -ItemType Directory -Force -Path $cfg.LogDir | Out-Null
+  $pidFile = Join-Path $cfg.LogDir ("agent_{0}.pid" -f $cfg.ListenPort)
+  Set-Content -LiteralPath $pidFile -Value $PID
+} catch {}
 
 Write-Console ("Agent up. name={0} listen={1}:{2} log_dir={3} state={4}" -f $cfg.Name, $cfg.ListenAddr, $cfg.ListenPort, $cfg.LogDir, $cfg.StateFile)
 
