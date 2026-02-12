@@ -85,6 +85,8 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
   - Codex console typically submits on `Ctrl+Enter`. If you see prompts only add a newline, set `CODEX_SEND_KEY=ctrl+enter`.
   - If your console submits on Enter, set `CODEX_SEND_KEY=enter`.
 - Logs live in `logs/` on each agent.
+- `update_and_start.ps1` starts agent/broker hidden by default. Set `TELEBOT_VISIBLE=1` to spawn visible terminals.
+- `watchdog.ps1` no longer starts the console agent by default. Opt in with `TELEBOT_WATCHDOG_START_CONSOLE_AGENT=1`.
 - Keep `AGENT_SECRET` the same on broker + agents.
 - If `CODEX_APPEND_SESSION=1`, the agent appends the Codex thread id, model, perms, and cwd to every response.
 - Broker clears any webhook on startup and refuses to run if another broker is already active.

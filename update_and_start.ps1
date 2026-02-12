@@ -62,7 +62,11 @@ function Restart-ByScriptPath {
   if (-not $pwsh) { $pwsh = (Get-Command powershell -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1) }
   if (-not $pwsh) { throw 'pwsh or powershell not found.' }
 
-  Start-Process -FilePath $pwsh -ArgumentList "-NoProfile -File `"$ScriptPath`""
+  $visible = $false
+  if ($env:TELEBOT_VISIBLE) { $visible = ($env:TELEBOT_VISIBLE -match '^(1|true|yes)$') }
+  $ws = if ($visible) { 'Normal' } else { 'Hidden' }
+
+  Start-Process -FilePath $pwsh -WorkingDirectory $RepoDir -WindowStyle $ws -ArgumentList @('-NoProfile','-File', $ScriptPath)
 }
 
 $legacyBotScript = Join-Path $RepoDir 'bot.ps1'
@@ -131,4 +135,3 @@ if (-not $runBroker) {
 
 if ($runBroker) { Restart-ByScriptPath -ScriptPath $brokerScript }
 if ($runAgent) { Restart-ByScriptPath -ScriptPath $agentScript }
-
