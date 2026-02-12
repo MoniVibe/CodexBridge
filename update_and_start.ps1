@@ -131,10 +131,12 @@ $runBroker = $false
 
 # Always stop any legacy polling bot (it conflicts with broker getUpdates and causes 409s).
 if (Test-Path -LiteralPath $legacyBotScript) {
-  $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$legacyBotScript*" }
-  foreach ($p in $procs) {
-    try { Stop-Process -Id $p.ProcessId -Force } catch {}
-  }
+  try {
+    $procs = Get-CimInstance Win32_Process -OperationTimeoutSec 2 | Where-Object { $_.CommandLine -like "*$legacyBotScript*" }
+    foreach ($p in $procs) {
+      try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    }
+  } catch {}
 }
 
 switch ($Role.ToLowerInvariant()) {
