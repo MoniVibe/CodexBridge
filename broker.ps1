@@ -1760,12 +1760,34 @@ function Handle-Command {
     'codexuse' {
       if (-not $rest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codexuse <session>'; return }
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.use'; session = $rest }
+      if ($resp.ok) {
+        $laneNorm = if ($laneKey) { $laneKey.ToLowerInvariant() } else { $target }
+        $sid = $null
+        try {
+          if ($resp.result -and $resp.result.session) { $sid = [string]$resp.result.session }
+        } catch {}
+        if (-not $sid) { $sid = (Trim-WhitespaceLike -Text $rest) }
+        if ($sid) {
+          Set-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm -SessionId $sid
+        }
+      }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       return
     }
     'codexresume' {
       if (-not $rest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: codexresume <session>'; return }
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.use'; session = $rest }
+      if ($resp.ok) {
+        $laneNorm = if ($laneKey) { $laneKey.ToLowerInvariant() } else { $target }
+        $sid = $null
+        try {
+          if ($resp.result -and $resp.result.session) { $sid = [string]$resp.result.session }
+        } catch {}
+        if (-not $sid) { $sid = (Trim-WhitespaceLike -Text $rest) }
+        if ($sid) {
+          Set-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm -SessionId $sid
+        }
+      }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
       return
     }

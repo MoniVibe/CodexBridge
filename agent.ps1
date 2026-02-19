@@ -1384,7 +1384,13 @@ function Refresh-CodexJobState {
   # If the job is done and we haven't promoted its output into codex_last_log/session yet, do it now.
   $jobId = $info.id
   $outFile = $info.out_file
+  $resumeThread = $null
+  if ($info.PSObject.Properties.Name -contains 'resume_thread_id') { $resumeThread = $info.resume_thread_id }
+  if (-not $resumeThread) {
+    if ($state.PSObject.Properties.Name -contains 'codex_job_resume_thread') { $resumeThread = $state.codex_job_resume_thread }
+  }
   $threadId = $info.thread_id
+  if (-not $threadId -and $resumeThread) { $threadId = $resumeThread }
   if (-not $threadId) {
     $startTime = $null
     try { if ($state.codex_job_started) { $startTime = [DateTime]::Parse($state.codex_job_started) } } catch {}
@@ -1396,11 +1402,6 @@ function Refresh-CodexJobState {
     $state.codex_has_session = $true
   }
   if (-not $threadId) {
-    $resumeThread = $null
-    if ($info.PSObject.Properties.Name -contains 'resume_thread_id') { $resumeThread = $info.resume_thread_id }
-    if (-not $resumeThread) {
-      if ($state.PSObject.Properties.Name -contains 'codex_job_resume_thread') { $resumeThread = $state.codex_job_resume_thread }
-    }
     if ($resumeThread) {
       $state.codex_session_id = $resumeThread
       $state.codex_has_session = $true
