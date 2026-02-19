@@ -1385,7 +1385,7 @@ function Refresh-CodexJobState {
   $jobId = $info.id
   $outFile = $info.out_file
   $resumeThread = $null
-  if ($info.PSObject.Properties.Name -contains 'resume_thread_id') { $resumeThread = $info.resume_thread_id }
+  try { if ($info.resume_thread_id) { $resumeThread = [string]$info.resume_thread_id } } catch {}
   if (-not $resumeThread) {
     if ($state.PSObject.Properties.Name -contains 'codex_job_resume_thread') { $resumeThread = $state.codex_job_resume_thread }
   }
