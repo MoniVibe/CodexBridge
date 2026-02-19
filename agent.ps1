@@ -114,6 +114,9 @@ function Get-Config {
     CodexAutoInit = $false
     CodexInitPrompt = 'Initialize session. Reply "ready".'
     CodexAppendSession = $true
+    HeadlessRebuildToolRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Tools\HeadlessRebuildTool')
+    AiInvokeScript = ''
+    AiArtifactsDir = ''
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -151,6 +154,9 @@ function Get-Config {
   if ($env:CODEX_INIT_PROMPT) { $cfg.CodexInitPrompt = $env:CODEX_INIT_PROMPT }
   if ($env:CODEX_APPEND_SESSION) { $cfg.CodexAppendSession = ($env:CODEX_APPEND_SESSION -match '^(1|true|yes)$') }
   if ($env:CODEX_MODE_OVERRIDE) { $cfg.CodexModeOverride = $env:CODEX_MODE_OVERRIDE }
+  if ($env:HEADLESS_REBUILD_TOOL_ROOT) { $cfg.HeadlessRebuildToolRoot = $env:HEADLESS_REBUILD_TOOL_ROOT }
+  if ($env:AI_INVOKE_SCRIPT) { $cfg.AiInvokeScript = $env:AI_INVOKE_SCRIPT }
+  if ($env:AI_ARTIFACTS_DIR) { $cfg.AiArtifactsDir = $env:AI_ARTIFACTS_DIR }
 
   if (-not (Test-Path -LiteralPath $cfg.RunnerPath)) {
     throw "runner.ps1 missing at $($cfg.RunnerPath)"
@@ -178,6 +184,13 @@ function Get-Config {
   if ($userCfg) {
     if ($userCfg.model) { $cfg.CodexUserConfigModel = [string]$userCfg.model }
     if ($userCfg.reasoning) { $cfg.CodexUserConfigReasoningEffort = [string]$userCfg.reasoning }
+  }
+
+  if (-not $cfg.AiInvokeScript) {
+    $cfg.AiInvokeScript = Join-Path $cfg.HeadlessRebuildToolRoot '.agents\skills\_shared\scripts\invoke_ai_sidecar.ps1'
+  }
+  if (-not $cfg.AiArtifactsDir) {
+    $cfg.AiArtifactsDir = Join-Path $cfg.HeadlessRebuildToolRoot '.agents\skills\artifacts\codexbridge-ai'
   }
 
   return $cfg
@@ -1046,7 +1059,7 @@ function Invoke-CodexExec {
   if (-not (Test-Path -LiteralPath $outFile)) {
     $output = "Error: codex did not write output file."
   } else {
-    $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
+    $output = Get-Content -LiteralPath $outFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
   }
 
   if (-not $output) { $output = '(no output)' }
@@ -1191,7 +1204,8 @@ function Get-LatestAssistantTextFromRollout {
 }
 
 function Resolve-CodexSessionFromRollout {
-  param([datetime]$StartTime, [datetime]$EndTime)
+  # Accept null values from callers. Many call sites use a best-effort start time which can be missing.
+  param([Nullable[datetime]]$StartTime, [Nullable[datetime]]$EndTime)
   try {
     $sessionRoot = Get-CodexSessionRoot
     if (-not (Test-Path -LiteralPath $sessionRoot)) { return $null }
@@ -1419,7 +1433,7 @@ function Refresh-CodexJobState {
   $finalLog = Join-Path $cfg.LogDir "codex_exec_${jobId}.log"
   $output = $null
   if ($outFile -and (Test-Path -LiteralPath $outFile)) {
-    $output = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
+    $output = Get-Content -LiteralPath $outFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
   }
   if ($output) { $output = $output.Trim() }
 
@@ -1678,6 +1692,117 @@ function List-CodexSessions {
   return $list
 }
 
+function Ensure-Dir {
+  param([string]$Path)
+  if (-not $Path) { return }
+  if (-not (Test-Path -LiteralPath $Path)) {
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+  }
+}
+
+function Resolve-TriRootFromHeadless {
+  param($cfg)
+  if (-not $cfg.HeadlessRebuildToolRoot) { return '' }
+  try {
+    $toolsRoot = Split-Path -Parent $cfg.HeadlessRebuildToolRoot
+    return (Split-Path -Parent $toolsRoot)
+  } catch {
+    return ''
+  }
+}
+
+function Find-DiagSummaryPath {
+  param($cfg, [string]$RunId)
+  if (-not $RunId) { return $null }
+  $triRoot = Resolve-TriRootFromHeadless -cfg $cfg
+  if (-not $triRoot) { return $null }
+
+  $searchRoots = @(
+    (Join-Path $triRoot 'reports'),
+    (Join-Path $triRoot 'tmp')
+  ) | Where-Object { Test-Path -LiteralPath $_ }
+
+  $hits = @()
+  foreach ($root in $searchRoots) {
+    try {
+      $hits += Get-ChildItem -Path $root -Recurse -File -Filter 'diag_*.md' -ErrorAction SilentlyContinue | Where-Object {
+        $_.FullName -match [regex]::Escape($RunId)
+      }
+    } catch {}
+  }
+
+  if (-not $hits -or $hits.Count -eq 0) { return $null }
+  return ($hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+}
+
+function Resolve-RunMonitorState {
+  param($cfg, [string]$RunId, [bool]$DiagPresent)
+  $state = [ordered]@{
+    run_id = $RunId
+    run_status = 'completed'
+    queue_status = 'unknown'
+    diag_present = $DiagPresent
+    lock_state = 'unknown'
+    active_title = 'space4x'
+    monitor_next_skill = ''
+    monitor_reason = ''
+  }
+
+  $monitorDir = Join-Path $cfg.HeadlessRebuildToolRoot '.agents\skills\artifacts\buildbox-run-monitor'
+  if (-not (Test-Path -LiteralPath $monitorDir)) { return $state }
+
+  $statusFiles = @(Get-ChildItem -Path $monitorDir -File -Filter 'monitor_status_*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+  foreach ($file in $statusFiles) {
+    try {
+      $obj = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+      if (-not $obj.run -or -not $obj.run.id) { continue }
+      if ([string]$obj.run.id -ne $RunId) { continue }
+      $state.run_status = if ($obj.run.status) { [string]$obj.run.status } else { 'unknown' }
+      $state.diag_present = if ($obj.diagnostics) { [bool]$obj.diagnostics.found } else { $DiagPresent }
+      $state.monitor_next_skill = if ($obj.next_skill) { [string]$obj.next_skill } else { '' }
+      $state.monitor_reason = if ($obj.next_reason) { [string]$obj.next_reason } else { '' }
+      if ($obj.run -and $obj.run.head_branch) {
+        $branch = [string]$obj.run.head_branch
+        if ($branch -match '(?i)godgame') { $state.active_title = 'godgame' }
+      }
+      return $state
+    } catch {}
+  }
+  return $state
+}
+
+function Invoke-AiSidecar {
+  param(
+    $cfg,
+    [string]$Command,
+    [object]$InputObject
+  )
+  if (-not (Test-Path -LiteralPath $cfg.AiInvokeScript)) {
+    throw "AI invoke script not found: $($cfg.AiInvokeScript)"
+  }
+
+  Ensure-Dir -Path $cfg.AiArtifactsDir
+  $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+  $jsonOut = Join-Path $cfg.AiArtifactsDir ("{0}_{1}.json" -f $Command, $stamp)
+  $mdOut = Join-Path $cfg.AiArtifactsDir ("{0}_{1}.md" -f $Command, $stamp)
+
+  $raw = & $cfg.AiInvokeScript -Command $Command -InputObject $InputObject -OutputJsonPath $jsonOut -OutputMarkdownPath $mdOut
+  if (-not $raw) { throw "AI sidecar returned no envelope for $Command" }
+  $meta = $raw | ConvertFrom-Json
+
+  $payload = $null
+  if (Test-Path -LiteralPath $jsonOut) {
+    try { $payload = Get-Content -LiteralPath $jsonOut -Raw | ConvertFrom-Json } catch {}
+  }
+
+  return [ordered]@{
+    metadata = $meta
+    output = $payload
+    output_json_path = $jsonOut
+    output_markdown_path = $mdOut
+  }
+}
+
 $cfg = Get-Config -ConfigPath $ConfigPath
 $state = Load-State -cfg $cfg
 
@@ -1771,6 +1896,156 @@ while ($true) {
         if (-not (Test-Path -LiteralPath $log)) { throw 'Log not found.' }
         $text = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
         $resp = @{ ok = $true; result = @{ job_id = $req.job_id; output = $text } }
+      }
+      'ai.sidecar' {
+        if (-not $req.action) { throw 'action missing (diag|route|scoreboard|capabilities).' }
+        $action = ([string]$req.action).ToLowerInvariant()
+        switch ($action) {
+          'diag' {
+            if (-not $req.run_id) { throw 'run_id missing for ai diag.' }
+            $runId = [string]$req.run_id
+            $diagPath = Find-DiagSummaryPath -cfg $cfg -RunId $runId
+            if (-not $diagPath) { throw "diag summary not found for run_id=$runId" }
+            $resultDir = Split-Path -Parent $diagPath
+            $evidence = @()
+            $candidateFiles = @(
+              @{ path = (Join-Path $resultDir 'meta.json'); kind = 'json' },
+              @{ path = (Join-Path $resultDir 'out\run_summary.json'); kind = 'json' },
+              @{ path = (Join-Path $resultDir 'out\watchdog.json'); kind = 'json' },
+              @{ path = (Join-Path $resultDir 'out\player.log'); kind = 'log' }
+            )
+            foreach ($candidate in $candidateFiles) {
+              $p = [string]$candidate.path
+              if (-not (Test-Path -LiteralPath $p)) { continue }
+              $snippet = (Get-Content -LiteralPath $p -ErrorAction SilentlyContinue | Select-Object -First 120) -join "`n"
+              if (-not $snippet) { continue }
+              $evidence += [ordered]@{
+                path = $p
+                kind = [string]$candidate.kind
+                excerpt = $snippet
+              }
+            }
+
+            $inputObj = [ordered]@{
+              diag_summary_path = $diagPath
+              diag_summary_text = (Get-Content -LiteralPath $diagPath -Raw -ErrorAction SilentlyContinue)
+              evidence = $evidence
+              context = [ordered]@{
+                run_id = $runId
+              }
+            }
+
+            $aiResult = Invoke-AiSidecar -cfg $cfg -Command 'ai_diag_summary' -InputObject $inputObj
+            $summary = ''
+            if ($aiResult.output) {
+              $summary = "next_lane=$($aiResult.output.recommended_next_lane) confidence=$($aiResult.output.confidence)"
+            }
+            $resp = @{
+              ok = $true
+              result = @{
+                action = 'diag'
+                run_id = $runId
+                diag_summary_path = $diagPath
+                output_json_path = $aiResult.output_json_path
+                output_markdown_path = $aiResult.output_markdown_path
+                ai_output = $aiResult.output
+                metadata = $aiResult.metadata.metadata
+                summary = $summary
+              }
+            }
+          }
+          'route' {
+            if (-not $req.run_id) { throw 'run_id missing for ai route.' }
+            $runId = [string]$req.run_id
+            $diagPath = Find-DiagSummaryPath -cfg $cfg -RunId $runId
+            $runState = Resolve-RunMonitorState -cfg $cfg -RunId $runId -DiagPresent ([bool]$diagPath)
+            $aiResult = Invoke-AiSidecar -cfg $cfg -Command 'ai_next_lane_router' -InputObject $runState
+            $summary = ''
+            if ($aiResult.output) {
+              $summary = "next_skill=$($aiResult.output.next_skill) safe_mode=$($aiResult.output.safe_mode)"
+            }
+            $resp = @{
+              ok = $true
+              result = @{
+                action = 'route'
+                run_id = $runId
+                run_state = $runState
+                output_json_path = $aiResult.output_json_path
+                output_markdown_path = $aiResult.output_markdown_path
+                ai_output = $aiResult.output
+                metadata = $aiResult.metadata.metadata
+                summary = $summary
+              }
+            }
+          }
+          'scoreboard' {
+            if (-not $req.path) { throw 'path missing for ai scoreboard.' }
+            $rawPath = [string]$req.path
+            if (-not (Test-Path -LiteralPath $rawPath)) { throw "scoreboard path not found: $rawPath" }
+
+            $scoreboardPath = $rawPath
+            if ((Get-Item -LiteralPath $rawPath).PSIsContainer) {
+              $scoreboardPath = Join-Path $rawPath 'scoreboard.json'
+            }
+            if (-not (Test-Path -LiteralPath $scoreboardPath)) {
+              throw "scoreboard file not found: $scoreboardPath"
+            }
+
+            $scoreboardJson = $null
+            try { $scoreboardJson = Get-Content -LiteralPath $scoreboardPath -Raw | ConvertFrom-Json } catch { $scoreboardJson = @{} }
+            $inputObj = [ordered]@{
+              scoreboard_json = $scoreboardJson
+              scoreboard_text = Get-Content -LiteralPath $scoreboardPath -Raw -ErrorAction SilentlyContinue
+              thresholds = @{}
+              recent_receipts = @()
+              context = [ordered]@{
+                scoreboard_path = $scoreboardPath
+              }
+            }
+
+            $aiResult = Invoke-AiSidecar -cfg $cfg -Command 'ai_scoreboard_headline' -InputObject $inputObj
+            $summary = ''
+            if ($aiResult.output) {
+              $summary = "headline=$($aiResult.output.headline)"
+            }
+            $resp = @{
+              ok = $true
+              result = @{
+                action = 'scoreboard'
+                scoreboard_path = $scoreboardPath
+                output_json_path = $aiResult.output_json_path
+                output_markdown_path = $aiResult.output_markdown_path
+                ai_output = $aiResult.output
+                metadata = $aiResult.metadata.metadata
+                summary = $summary
+              }
+            }
+          }
+          'capabilities' {
+            $inputObj = @{}
+            if ($req.command) { $inputObj.command = [string]$req.command }
+
+            $aiResult = Invoke-AiSidecar -cfg $cfg -Command 'ai_capabilities' -InputObject $inputObj
+            $summary = ''
+            if ($aiResult.output -and $aiResult.output.commands) {
+              $summary = "commands=$(@($aiResult.output.commands).Count)"
+            }
+            $resp = @{
+              ok = $true
+              result = @{
+                action = 'capabilities'
+                output_json_path = $aiResult.output_json_path
+                output_markdown_path = $aiResult.output_markdown_path
+                ai_output = $aiResult.output
+                metadata = $aiResult.metadata.metadata
+                summary = $summary
+              }
+            }
+          }
+          default {
+            throw "Unknown ai action: $action"
+          }
+        }
       }
       'codex.send' {
         if (-not $req.prompt) { throw 'prompt missing.' }
@@ -2049,28 +2324,70 @@ while ($true) {
           }
           $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
         } else {
+          $requestedJobId = $null
+          if ($req.job_id) { $requestedJobId = [string]$req.job_id }
+          if ($requestedJobId) { $requestedJobId = $requestedJobId.Trim() }
+
           $job = Refresh-CodexJobState -cfg $cfg -state $state
-          if ($job -and $job.running) {
-            $tailLines = if ($req.lines) { [int]$req.lines } else { $cfg.CodexJobTailLines }
-            $parts = New-Object System.Collections.Generic.List[string]
-            $parts.Add(("Codex job running: id={0} pid={1} started={2}" -f $job.id, $job.pid, $job.started))
-            if ($job.stdout_file -and (Test-Path -LiteralPath $job.stdout_file)) {
-              $parts.Add('')
-              $parts.Add('--- stdout (tail) ---')
-              $parts.Add((Get-LogTail -LogPath $job.stdout_file -Lines $tailLines))
+          if ($requestedJobId) {
+            if ($job -and $job.id -and ([string]$job.id -eq $requestedJobId) -and $job.running) {
+              $tailLines = if ($req.lines) { [int]$req.lines } else { $cfg.CodexJobTailLines }
+              $parts = New-Object System.Collections.Generic.List[string]
+              $parts.Add(("Codex job running: id={0} pid={1} started={2}" -f $job.id, $job.pid, $job.started))
+              if ($job.stdout_file -and (Test-Path -LiteralPath $job.stdout_file)) {
+                $parts.Add('')
+                $parts.Add('--- stdout (tail) ---')
+                $parts.Add((Get-LogTail -LogPath $job.stdout_file -Lines $tailLines))
+              }
+              if ($job.stderr_file -and (Test-Path -LiteralPath $job.stderr_file)) {
+                $parts.Add('')
+                $parts.Add('--- stderr (tail) ---')
+                $parts.Add((Get-LogTail -LogPath $job.stderr_file -Lines $tailLines))
+              }
+              $resp = @{ ok = $true; result = @{ session = 'default'; output = ($parts -join "`n") } }
+            } else {
+              $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
+              $requestedLog = Join-Path $cfg.LogDir "codex_exec_${requestedJobId}.log"
+              if (Test-Path -LiteralPath $requestedLog) {
+                $tail = Get-LogTail -LogPath $requestedLog -Lines $lines
+                $tail = Ensure-SessionInfoSuffix -cfg $cfg -state $state -Text $tail
+                $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
+              } else {
+                $requestedOut = Join-Path $cfg.LogDir "codex_exec_${requestedJobId}.out"
+                if (Test-Path -LiteralPath $requestedOut) {
+                  $outText = Get-Content -LiteralPath $requestedOut -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                  if ($outText) { $outText = $outText.Trim() }
+                  if (-not $outText) { $outText = '(no output)' }
+                  $outText = Ensure-SessionInfoSuffix -cfg $cfg -state $state -Text $outText
+                  $resp = @{ ok = $true; result = @{ session = 'default'; output = $outText } }
+                } else {
+                  throw "No codex output for job $requestedJobId yet."
+                }
+              }
             }
-            if ($job.stderr_file -and (Test-Path -LiteralPath $job.stderr_file)) {
-              $parts.Add('')
-              $parts.Add('--- stderr (tail) ---')
-              $parts.Add((Get-LogTail -LogPath $job.stderr_file -Lines $tailLines))
-            }
-            $resp = @{ ok = $true; result = @{ session = 'default'; output = ($parts -join "`n") } }
           } else {
-            if (-not $state.codex_last_log) { throw 'No codex output yet.' }
-            $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
-            $tail = Get-LogTail -LogPath $state.codex_last_log -Lines $lines
-            $tail = Ensure-SessionInfoSuffix -cfg $cfg -state $state -Text $tail
-            $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
+            if ($job -and $job.running) {
+              $tailLines = if ($req.lines) { [int]$req.lines } else { $cfg.CodexJobTailLines }
+              $parts = New-Object System.Collections.Generic.List[string]
+              $parts.Add(("Codex job running: id={0} pid={1} started={2}" -f $job.id, $job.pid, $job.started))
+              if ($job.stdout_file -and (Test-Path -LiteralPath $job.stdout_file)) {
+                $parts.Add('')
+                $parts.Add('--- stdout (tail) ---')
+                $parts.Add((Get-LogTail -LogPath $job.stdout_file -Lines $tailLines))
+              }
+              if ($job.stderr_file -and (Test-Path -LiteralPath $job.stderr_file)) {
+                $parts.Add('')
+                $parts.Add('--- stderr (tail) ---')
+                $parts.Add((Get-LogTail -LogPath $job.stderr_file -Lines $tailLines))
+              }
+              $resp = @{ ok = $true; result = @{ session = 'default'; output = ($parts -join "`n") } }
+            } else {
+              if (-not $state.codex_last_log) { throw 'No codex output yet.' }
+              $lines = if ($req.lines) { [int]$req.lines } else { $cfg.TailLines }
+              $tail = Get-LogTail -LogPath $state.codex_last_log -Lines $lines
+              $tail = Ensure-SessionInfoSuffix -cfg $cfg -state $state -Text $tail
+              $resp = @{ ok = $true; result = @{ session = 'default'; output = $tail } }
+            }
           }
         }
       }

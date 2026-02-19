@@ -111,7 +111,13 @@ function Get-Config {
   }
 
   if (-not $cfg.BotToken) { throw 'TG_BOT_TOKEN missing in broker.env' }
-  if (-not $cfg.ChatIds -or $cfg.ChatIds.Count -eq 0) { throw 'TG_CHAT_ID missing in broker.env' }
+
+  # Allow running without TG_CHAT_ID (accept commands from any chat).
+  # This matches Is-AllowedChat() behavior and helps bootstrap a new bot.
+  if (-not $cfg.ChatIds -or $cfg.ChatIds.Count -eq 0) {
+    $cfg.ChatIds = @()
+    Write-Console 'WARN: TG_CHAT_ID not set; broker will accept commands from any chat.'
+  }
 
   # Per-machine default: if no TARGET_* entries are present, dispatch to the local agent.
   # (You can still configure multiple TARGET_* entries for router mode.)
@@ -161,11 +167,22 @@ function Load-State {
       if ($null -ne $obj) {
         Ensure-StateProperty -state $obj -Name 'last_update_id' -Value 0
         Ensure-StateProperty -state $obj -Name 'pending_codex_jobs' -Value @()
+        Ensure-StateProperty -state $obj -Name 'chat_target_map' -Value @{}
+        Ensure-StateProperty -state $obj -Name 'chat_lane_map' -Value @{}
+        Ensure-StateProperty -state $obj -Name 'lane_session_map' -Value @{}
+        Ensure-StateProperty -state $obj -Name 'pending_codex_prompts' -Value @()
         return $obj
       }
     } catch {}
   }
-  return [pscustomobject]@{ last_update_id = 0; pending_codex_jobs = @() }
+  return [pscustomobject]@{
+    last_update_id = 0
+    pending_codex_jobs = @()
+    chat_target_map = @{}
+    chat_lane_map = @{}
+    lane_session_map = @{}
+    pending_codex_prompts = @()
+  }
 }
 
 function Save-State {
@@ -525,7 +542,9 @@ function Send-CodexConfigPanel {
   $mode = if ($snap.mode_raw) { $snap.mode_raw } else { 'exec' }
   $model = if ($snap.model_raw) { $snap.model_raw } else { 'default' }
   $reasoning = if ($snap.reasoning_raw) { $snap.reasoning_raw } else { 'default' }
-  $text = "[telebot] target: $Target`nmode: $mode`nmodel: $model`nreasoning: $reasoning`n`nExec is default for prompts."
+  $targets = @($cfg.Targets.Keys | Sort-Object)
+  $targetsText = if ($targets.Count -gt 0) { $targets -join ', ' } else { '(none)' }
+  $text = "[telebot] target: $Target`nmode: $mode`nmodel: $model`nreasoning: $reasoning`ntargets: $targetsText`nlanes: idN (id1, id2, ...) on active target`n`nExec is default for prompts. Use idN prefixes for lane routing."
   if ($Notice) { $text = $Notice + "`n`n" + $text }
   $markup = New-CodexConfigMarkup -Target $Target -ModelRaw $snap.model_raw -ReasoningRaw $snap.reasoning_raw -ModeRaw $snap.mode_raw
   Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $text -ReplyMarkup $markup
@@ -642,6 +661,288 @@ function Ensure-SingleBroker {
   $script:BrokerMutex = $mutex
 }
 
+function Get-SortedTargetKeys {
+  param($cfg)
+  if (-not $cfg -or -not $cfg.Targets) { return @() }
+  return @($cfg.Targets.Keys | Sort-Object)
+}
+
+function Resolve-TargetAlias {
+  param($cfg, [string]$Token, [string]$FallbackTarget = '')
+  $t = (Normalize-Token -Token $Token).ToLowerInvariant()
+  if (-not $t) { return @{ ok = $false; target = $null; is_id = $false; id = 0; alias = '' } }
+  if ($cfg.Targets.ContainsKey($t)) {
+    return @{ ok = $true; target = $t; is_id = $false; id = 0; alias = $t }
+  }
+
+  $m = [System.Text.RegularExpressions.Regex]::Match($t, '^id([1-9]\d*)$')
+  if (-not $m.Success) { return @{ ok = $false; target = $null; is_id = $false; id = 0; alias = '' } }
+
+  $id = [int]$m.Groups[1].Value
+  $targetResolved = $null
+  $fallbackNorm = (Normalize-Token -Token $FallbackTarget).ToLowerInvariant()
+  if ($fallbackNorm -and $cfg.Targets.ContainsKey($fallbackNorm)) {
+    $targetResolved = $fallbackNorm
+  } elseif ($cfg.DefaultTarget -and $cfg.Targets.ContainsKey($cfg.DefaultTarget)) {
+    $targetResolved = [string]$cfg.DefaultTarget
+  } else {
+    $keys = @(Get-SortedTargetKeys -cfg $cfg)
+    if ($keys.Count -gt 0) { $targetResolved = [string]$keys[0] }
+  }
+
+  if (-not $targetResolved) { return @{ ok = $false; target = $null; is_id = $true; id = $id; alias = ("id{0}" -f $id) } }
+  return @{ ok = $true; target = $targetResolved; is_id = $true; id = $id; alias = ("id{0}" -f $id) }
+}
+
+function Get-TargetIdMapText {
+  param($cfg)
+  $keys = @(Get-SortedTargetKeys -cfg $cfg)
+  if ($keys.Count -eq 0) { return '(no targets)' }
+  $pairs = New-Object System.Collections.Generic.List[string]
+  for ($i = 0; $i -lt $keys.Count; $i++) {
+    $pairs.Add(("id{0}={1}" -f ($i + 1), $keys[$i]))
+  }
+  return ($pairs -join ', ')
+}
+
+function Get-TargetIdLabel {
+  param($cfg, [string]$Target)
+  if (-not $Target) { return $null }
+  $targetNorm = $Target.ToLowerInvariant()
+  $keys = @(Get-SortedTargetKeys -cfg $cfg)
+  for ($i = 0; $i -lt $keys.Count; $i++) {
+    if ([string]$keys[$i] -eq $targetNorm) { return ("id{0}" -f ($i + 1)) }
+  }
+  return $null
+}
+
+function Ensure-ChatTargetMap {
+  param($state)
+  if (-not $state) { return $null }
+  Ensure-StateProperty -state $state -Name 'chat_target_map' -Value @{}
+  try {
+    if ($null -eq $state.chat_target_map) { $state.chat_target_map = @{} }
+  } catch {
+    try { $state | Add-Member -NotePropertyName 'chat_target_map' -NotePropertyValue @{} -Force } catch {}
+  }
+  return $state.chat_target_map
+}
+
+function Get-ChatStickyTarget {
+  param($cfg, $state, [string]$ChatId)
+  if (-not $ChatId) { return $null }
+  $map = Ensure-ChatTargetMap -state $state
+  if ($null -eq $map) { return $null }
+
+  $raw = $null
+  if ($map -is [System.Collections.IDictionary]) {
+    if ($map.Contains($ChatId)) {
+      try { $raw = [string]$map[$ChatId] } catch {}
+    }
+  } else {
+    try {
+      $prop = $map.PSObject.Properties[$ChatId]
+      if ($prop) { $raw = [string]$prop.Value }
+    } catch {}
+  }
+
+  if (-not $raw) { return $null }
+  $target = $raw.ToLowerInvariant()
+  if (-not $cfg.Targets.ContainsKey($target)) { return $null }
+  return $target
+}
+
+function Set-ChatStickyTarget {
+  param($cfg, $state, [string]$ChatId, [string]$Target)
+  if (-not $state -or -not $ChatId -or -not $Target) { return }
+  $targetNorm = $Target.ToLowerInvariant()
+  if (-not $cfg.Targets.ContainsKey($targetNorm)) { return }
+
+  $map = Ensure-ChatTargetMap -state $state
+  if ($null -eq $map) { return }
+
+  $updated = $false
+  if ($map -is [System.Collections.IDictionary]) {
+    try { $map[$ChatId] = $targetNorm; $updated = $true } catch {}
+  } else {
+    try {
+      if ($map.PSObject.Properties.Name -contains $ChatId) { $map.$ChatId = $targetNorm }
+      else { $map | Add-Member -NotePropertyName $ChatId -NotePropertyValue $targetNorm -Force }
+      $updated = $true
+    } catch {}
+  }
+
+  if ($updated) { Save-State -cfg $cfg -state $state }
+}
+
+function Ensure-ChatLaneMap {
+  param($state)
+  if (-not $state) { return $null }
+  Ensure-StateProperty -state $state -Name 'chat_lane_map' -Value @{}
+  try {
+    if ($null -eq $state.chat_lane_map) { $state.chat_lane_map = @{} }
+  } catch {
+    try { $state | Add-Member -NotePropertyName 'chat_lane_map' -NotePropertyValue @{} -Force } catch {}
+  }
+  return $state.chat_lane_map
+}
+
+function Get-ChatStickyLane {
+  param($state, [string]$ChatId)
+  if (-not $ChatId) { return $null }
+  $map = Ensure-ChatLaneMap -state $state
+  if ($null -eq $map) { return $null }
+
+  $raw = $null
+  if ($map -is [System.Collections.IDictionary]) {
+    if ($map.Contains($ChatId)) {
+      try { $raw = [string]$map[$ChatId] } catch {}
+    }
+  } else {
+    try {
+      $prop = $map.PSObject.Properties[$ChatId]
+      if ($prop) { $raw = [string]$prop.Value }
+    } catch {}
+  }
+
+  if (-not $raw) { return $null }
+  return $raw.ToLowerInvariant()
+}
+
+function Set-ChatStickyLane {
+  param($cfg, $state, [string]$ChatId, [string]$LaneKey)
+  if (-not $state -or -not $ChatId -or -not $LaneKey) { return }
+  $laneNorm = $LaneKey.ToLowerInvariant()
+
+  $map = Ensure-ChatLaneMap -state $state
+  if ($null -eq $map) { return }
+
+  $updated = $false
+  if ($map -is [System.Collections.IDictionary]) {
+    try { $map[$ChatId] = $laneNorm; $updated = $true } catch {}
+  } else {
+    try {
+      if ($map.PSObject.Properties.Name -contains $ChatId) { $map.$ChatId = $laneNorm }
+      else { $map | Add-Member -NotePropertyName $ChatId -NotePropertyValue $laneNorm -Force }
+      $updated = $true
+    } catch {}
+  }
+
+  if ($updated) { Save-State -cfg $cfg -state $state }
+}
+
+function Ensure-LaneSessionMap {
+  param($state)
+  if (-not $state) { return $null }
+  Ensure-StateProperty -state $state -Name 'lane_session_map' -Value @{}
+  try {
+    if ($null -eq $state.lane_session_map) { $state.lane_session_map = @{} }
+  } catch {
+    try { $state | Add-Member -NotePropertyName 'lane_session_map' -NotePropertyValue @{} -Force } catch {}
+  }
+  return $state.lane_session_map
+}
+
+function Get-LaneSessionMapKey {
+  param([string]$ChatId, [string]$Target, [string]$LaneKey)
+  if (-not $ChatId -or -not $Target) { return '' }
+  $targetNorm = $Target.ToLowerInvariant()
+  $laneNorm = if ($LaneKey) { $LaneKey.ToLowerInvariant() } else { $targetNorm }
+  return "$ChatId|$targetNorm|$laneNorm"
+}
+
+function Get-LaneSessionId {
+  param($state, [string]$ChatId, [string]$Target, [string]$LaneKey)
+  $map = Ensure-LaneSessionMap -state $state
+  if ($null -eq $map) { return $null }
+  $key = Get-LaneSessionMapKey -ChatId $ChatId -Target $Target -LaneKey $LaneKey
+  if (-not $key) { return $null }
+
+  $raw = $null
+  if ($map -is [System.Collections.IDictionary]) {
+    if ($map.Contains($key)) {
+      try { $raw = [string]$map[$key] } catch {}
+    }
+  } else {
+    try {
+      $prop = $map.PSObject.Properties[$key]
+      if ($prop) { $raw = [string]$prop.Value }
+    } catch {}
+  }
+  if (-not $raw) { return $null }
+  return $raw.Trim()
+}
+
+function Set-LaneSessionId {
+  param($cfg, $state, [string]$ChatId, [string]$Target, [string]$LaneKey, [string]$SessionId)
+  if (-not $state -or -not $ChatId -or -not $Target) { return }
+  if (-not $SessionId) { return }
+  $sid = $SessionId.Trim()
+  if (-not $sid) { return }
+  $key = Get-LaneSessionMapKey -ChatId $ChatId -Target $Target -LaneKey $LaneKey
+  if (-not $key) { return }
+
+  $map = Ensure-LaneSessionMap -state $state
+  if ($null -eq $map) { return }
+  $updated = $false
+  if ($map -is [System.Collections.IDictionary]) {
+    try { $map[$key] = $sid; $updated = $true } catch {}
+  } else {
+    try {
+      if ($map.PSObject.Properties.Name -contains $key) { $map.PSObject.Properties[$key].Value = $sid }
+      else { $map | Add-Member -NotePropertyName $key -NotePropertyValue $sid -Force }
+      $updated = $true
+    } catch {}
+  }
+  if ($updated) { Save-State -cfg $cfg -state $state }
+}
+
+function Clear-LaneSessionId {
+  param($cfg, $state, [string]$ChatId, [string]$Target, [string]$LaneKey)
+  if (-not $state -or -not $ChatId -or -not $Target) { return }
+  $key = Get-LaneSessionMapKey -ChatId $ChatId -Target $Target -LaneKey $LaneKey
+  if (-not $key) { return }
+  $map = Ensure-LaneSessionMap -state $state
+  if ($null -eq $map) { return }
+
+  $updated = $false
+  if ($map -is [System.Collections.IDictionary]) {
+    if ($map.Contains($key)) {
+      try { $null = $map.Remove($key); $updated = $true } catch {}
+    }
+  } else {
+    try {
+      if ($map.PSObject.Properties.Name -contains $key) {
+        $map.PSObject.Properties.Remove($key)
+        $updated = $true
+      }
+    } catch {}
+  }
+  if ($updated) { Save-State -cfg $cfg -state $state }
+}
+
+function Try-ExtractCodexSessionIdFromText {
+  param([string]$Text)
+  if (-not $Text) { return $null }
+  $m = [System.Text.RegularExpressions.Regex]::Match($Text, 'codex_session_id:\s*([0-9a-fA-F-]{16,})')
+  if ($m.Success) { return [string]$m.Groups[1].Value }
+  $m2 = [System.Text.RegularExpressions.Regex]::Match($Text, 'thread_id=([0-9a-fA-F-]{16,})')
+  if ($m2.Success) { return [string]$m2.Groups[1].Value }
+  return $null
+}
+
+function Ensure-PendingCodexPromptQueue {
+  param($state)
+  if (-not $state) { return @() }
+  Ensure-StateProperty -state $state -Name 'pending_codex_prompts' -Value @()
+  try {
+    if ($null -eq $state.pending_codex_prompts) { $state.pending_codex_prompts = @() }
+  } catch {
+    try { $state | Add-Member -NotePropertyName 'pending_codex_prompts' -NotePropertyValue @() -Force } catch {}
+  }
+  return @($state.pending_codex_prompts)
+}
+
 function Is-KnownCommandOrTarget {
   param($cfg, [string]$Text)
   if (-not $Text) { return $false }
@@ -649,11 +950,12 @@ function Is-KnownCommandOrTarget {
   $token = (Normalize-Token -Token $split.token).ToLowerInvariant()
   if (-not $token) { return $false }
   if ($cfg.Targets.ContainsKey($token)) { return $true }
+  if ($token -match '^id[1-9]\d*$') { return $true }
   $known = @(
     'help','status','run','last','tail','get','codex','codexnew','codexfresh','codexfreshconsole','agent',
     'codexsession','codexjob','codexcancel','codexmodel','codexreasoning','codexconfig','codexuse','codexresume','codexreset','codexstart','codexstop','codexlist','codexlast',
     'codexexec','codexexecnew','codexforceexec','codexforceexecnew','codexconsole','codexconsolenew','codexconsoleexec','codexconsoleexecnew',
-    'cancel','job','model','reasoning','config','session','console'
+    'cancel','job','model','reasoning','config','session','console','ai'
   )
   return $known -contains $token
 }
@@ -713,34 +1015,57 @@ function Handle-Command {
   $rawLog = $raw -replace "`r","\\r" -replace "`n","\\n"
   Write-BotLog -Path $cfg.BotLog -Message "recv[$ChatId]: $rawLog"
 
-  $target = $cfg.DefaultTarget
+  $stickyTarget = Get-ChatStickyTarget -cfg $cfg -state $state -ChatId $ChatId
+  $target = if ($stickyTarget) { $stickyTarget } else { $cfg.DefaultTarget }
+  $stickyLane = Get-ChatStickyLane -state $state -ChatId $ChatId
+  $laneKey = if ($stickyLane) { $stickyLane } else { $target }
   $split1 = Split-FirstToken -Text $raw
   $token1 = Normalize-Token -Token $split1.token
   $rest1 = $split1.rest
 
   $token1Lower = $token1.ToLowerInvariant()
-  if ($cfg.Targets.ContainsKey($token1Lower)) {
-    $target = $token1Lower
+  $routeWasExplicit = $false
+  $routeResolved = Resolve-TargetAlias -cfg $cfg -Token $token1Lower -FallbackTarget $target
+  if ($routeResolved.ok) {
+    $target = [string]$routeResolved.target
+    $laneKey = if ($routeResolved.alias) { [string]$routeResolved.alias } else { $target }
+    $routeWasExplicit = $true
     $split2 = Split-FirstToken -Text $rest1
     $cmd = (Normalize-Token -Token $split2.token).ToLowerInvariant()
     $rest = $split2.rest
+  } elseif ($routeResolved.is_id) {
+    Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Unable to resolve active target for lane id{0}. Set a target first (for example: pc) then retry." -f $routeResolved.id)
+    return
   } else {
     $cmd = $token1Lower
     $rest = $rest1
   }
 
   # Convenience: allow "lapcancel" (no space) by splitting known target prefixes.
-  if (-not $cfg.Targets.ContainsKey($token1Lower)) {
+  if (-not $routeWasExplicit) {
     foreach ($t in $cfg.Targets.Keys) {
       if ($token1Lower.StartsWith($t, [System.StringComparison]::InvariantCultureIgnoreCase) -and $token1Lower.Length -gt $t.Length) {
         $suffix = $token1Lower.Substring($t.Length)
         if (Is-KnownCommandOrTarget -cfg $cfg -Text $suffix) {
           $target = $t
+          $laneKey = $t
+          $routeWasExplicit = $true
           $cmd = $suffix
           $rest = $rest1
           break
         }
       }
+    }
+  }
+
+  if ($routeWasExplicit) {
+    Set-ChatStickyTarget -cfg $cfg -state $state -ChatId $ChatId -Target $target
+    Set-ChatStickyLane -cfg $cfg -state $state -ChatId $ChatId -LaneKey $laneKey
+    if (-not $cmd) {
+      $targetDesc = $target
+      $laneDesc = if ($laneKey) { $laneKey } else { $target }
+      Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Active target set to {0}. Active lane: {1}. Next plain prompts will use this lane." -f $targetDesc, $laneDesc)
+      return
     }
   }
 
@@ -759,10 +1084,10 @@ function Handle-Command {
   }
   if ($aliases.ContainsKey($cmd)) { $cmd = $aliases[$cmd] }
 
-  Write-BotLog -Path $cfg.BotLog -Message ("parse: target={0} cmd={1} restLen={2}" -f $target, $cmd, ($rest | ForEach-Object { $_.Length }))
+  Write-BotLog -Path $cfg.BotLog -Message ("parse: target={0} lane={1} cmd={2} restLen={3}" -f $target, $laneKey, $cmd, ($rest | ForEach-Object { $_.Length }))
 
   function Add-PendingCodexJob {
-    param([string]$JobId, [string]$Target, [string]$ChatId)
+    param([string]$JobId, [string]$Target, [string]$ChatId, [string]$LaneKey = '')
     if (-not $state) { return }
     Ensure-StateProperty -state $state -Name 'pending_codex_jobs' -Value @()
     $existing = @()
@@ -772,21 +1097,206 @@ function Handle-Command {
       job_id = $JobId
       target = $Target
       chat_id = $ChatId
+      lane_key = $LaneKey
       queued_at = (Get-Date).ToString('o')
     }
     $state.pending_codex_jobs = $filtered
     Save-State -cfg $cfg -state $state
   }
 
+  function Add-PendingCodexPrompt {
+    param([string]$Target, [string]$ChatId, [string]$CommandText, [string]$LaneKey = '')
+    if (-not $state -or -not $Target -or -not $ChatId -or -not $CommandText) { return '' }
+    Ensure-StateProperty -state $state -Name 'pending_codex_prompts' -Value @()
+    $existing = @()
+    try { $existing = @($state.pending_codex_prompts) } catch { $existing = @() }
+    $entryId = "{0}_{1}" -f (Get-Date).ToString('yyyyMMdd_HHmmss'), (Get-Random -Minimum 1000 -Maximum 9999)
+    $existing += [pscustomobject]@{
+      id = $entryId
+      target = $Target
+      chat_id = $ChatId
+      lane_key = $LaneKey
+      command_text = $CommandText
+      queued_at = (Get-Date).ToString('o')
+    }
+    $state.pending_codex_prompts = $existing
+    Save-State -cfg $cfg -state $state
+    return $entryId
+  }
+
+  function Get-LaneStatusLabel {
+    param([string]$LaneCandidate, [string]$TargetCandidate)
+    if ($LaneCandidate) { return $LaneCandidate }
+    if ($TargetCandidate) { return $TargetCandidate }
+    return 'default'
+  }
+
+  function Invoke-LaneExecPrompt {
+    param([string]$Prompt, [bool]$ForceNew = $false, [string]$QueuedCommandText = '')
+
+    if (-not (Trim-WhitespaceLike -Text $Prompt)) {
+      return @{ ok = $false; queued = $false; message = 'Prompt missing.' }
+    }
+
+    $laneNorm = if ($laneKey) { $laneKey.ToLowerInvariant() } else { $target }
+    $resp = $null
+    if ($ForceNew) {
+      Clear-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new.exec'; prompt = $Prompt }
+    } else {
+      $laneSession = Get-LaneSessionId -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm
+      if ($laneSession) {
+        $useResp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.use'; session = $laneSession }
+        if (-not $useResp.ok) {
+          Clear-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm
+          $laneSession = $null
+        }
+      }
+
+      if (-not $laneSession -and $laneNorm -match '^id[1-9]\d*$') {
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new.exec'; prompt = $Prompt }
+      } else {
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $Prompt; session = 'default'; auto_start = $true }
+      }
+    }
+
+    if (-not $resp.ok) {
+      $errText = [string]$resp.error
+      if ($errText -match 'Codex job already running') {
+        $routePrefix = if ($laneNorm -match '^id[1-9]\d*$') { $laneNorm } else { $target }
+        $queueText = if ($QueuedCommandText) { $QueuedCommandText } else { ("{0} {1}" -f $routePrefix, $Prompt) }
+        $qid = Add-PendingCodexPrompt -Target $target -ChatId $ChatId -CommandText $queueText -LaneKey $laneNorm
+        return @{
+          ok = $true
+          queued = $true
+          message = ("Target {0} is busy. Queued lane {1} as {2}." -f $target, $laneNorm, $qid)
+        }
+      }
+      return @{ ok = $false; queued = $false; message = (Format-ResultText $resp) }
+    }
+
+    $out = $resp.result.output
+    $jobId = $null
+    $jobPid = $null
+    if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
+    if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
+
+    if ($jobId -and $jobPid) {
+      Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId -LaneKey $laneNorm
+      return @{
+        ok = $true
+        queued = $false
+        has_job = $true
+        job_id = $jobId
+        out = $out
+      }
+    }
+
+    $sid = Try-ExtractCodexSessionIdFromText -Text ([string]$out)
+    if ($sid) {
+      Set-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneNorm -SessionId $sid
+    }
+
+    return @{
+      ok = $true
+      queued = $false
+      has_job = $false
+      out = $out
+    }
+  }
+
   switch ($cmd) {
     'help' {
-      $msg = "Default: plain text is sent to Codex exec. Targets: $($cfg.Targets.Keys -join ', '). Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | skills list|info <name>|doctor|run <name> [args...] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $activeTarget = if ($target) { $target } else { $cfg.DefaultTarget }
+      $msg = "Default: plain text is sent to Codex exec on the active target. Active target (this chat): $activeTarget. Targets: $($cfg.Targets.Keys -join ', '). Lanes: idN (id1, id2, ...) on the active target. Use idN <prompt> or <target> <prompt>; the last explicit id/target becomes sticky for this chat. idN lanes on the same target keep separate sessions; when target is busy, prompts are queued per lane. Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | ai diag <run_id> | ai route <run_id> | ai scoreboard <path> | ai capabilities [command] | skills list|info <name>|doctor|run <name> [args...] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
     'status' {
       $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'ping' }
       Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      return
+    }
+    'ai' {
+      if (-not $rest) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: ai diag <run_id> | ai route <run_id> | ai scoreboard <path> | ai capabilities [command]'
+        return
+      }
+
+      $subSplit = Split-FirstToken -Text $rest
+      $subCmd = (Normalize-Token -Token $subSplit.token).ToLowerInvariant()
+      $subRest = Trim-WhitespaceLike -Text $subSplit.rest
+      $payload = @{ op = 'ai.sidecar' }
+
+      switch ($subCmd) {
+        'diag' {
+          if (-not $subRest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: ai diag <run_id>'; return }
+          $payload.action = 'diag'
+          $payload.run_id = $subRest
+        }
+        'route' {
+          if (-not $subRest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: ai route <run_id>'; return }
+          $payload.action = 'route'
+          $payload.run_id = $subRest
+        }
+        'scoreboard' {
+          if (-not $subRest) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: ai scoreboard <path>'; return }
+          $payload.action = 'scoreboard'
+          $payload.path = $subRest
+        }
+        'capabilities' {
+          $payload.action = 'capabilities'
+          if ($subRest) { $payload.command = $subRest }
+        }
+        default {
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Usage: ai diag <run_id> | ai route <run_id> | ai scoreboard <path> | ai capabilities [command]'
+          return
+        }
+      }
+
+      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
+      if (-not $resp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        return
+      }
+
+      $result = $resp.result
+      if (-not $result) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'AI command returned no result.'
+        return
+      }
+
+      $lines = New-Object System.Collections.Generic.List[string]
+      $lines.Add("AI action: $($result.action)")
+      if ($result.summary) { $lines.Add("summary: $($result.summary)") }
+      if ($result.output_json_path) { $lines.Add("output_json: $($result.output_json_path)") }
+      if ($result.output_markdown_path) { $lines.Add("output_md: $($result.output_markdown_path)") }
+      if ($result.ai_output) {
+        switch ($result.action) {
+          'diag' {
+            if ($result.ai_output.recommended_next_lane) { $lines.Add("recommended_next_lane: $($result.ai_output.recommended_next_lane)") }
+            if ($result.ai_output.confidence -ne $null) { $lines.Add("confidence: $($result.ai_output.confidence)") }
+          }
+          'route' {
+            if ($result.ai_output.next_skill) { $lines.Add("next_skill: $($result.ai_output.next_skill)") }
+            if ($result.ai_output.reason) { $lines.Add("reason: $($result.ai_output.reason)") }
+          }
+          'scoreboard' {
+            if ($result.ai_output.headline) { $lines.Add("headline: $($result.ai_output.headline)") }
+            if ($result.ai_output.suggested_next_run) { $lines.Add("suggested_next_run: $($result.ai_output.suggested_next_run)") }
+          }
+          'capabilities' {
+            if ($result.ai_output.commands) {
+              $count = @($result.ai_output.commands).Count
+              $lines.Add("commands: $count")
+              foreach ($cmdInfo in @($result.ai_output.commands) | Select-Object -First 6) {
+                if ($cmdInfo.name) { $lines.Add(" - $($cmdInfo.name)") }
+              }
+            }
+          }
+        }
+      }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text ($lines -join "`n")
       return
     }
     'skills' {
@@ -816,28 +1326,23 @@ function Handle-Command {
       if ($rest -and ($rest -notmatch '^\d+$')) {
         # Treat natural language that starts with "last" as a prompt, not a command.
         $promptText = $raw
-        if ($cfg.Targets.ContainsKey($token1Lower) -and $rest1) { $promptText = $rest1 }
+        if ($routeWasExplicit -and $rest1) { $promptText = $rest1 }
         if (-not (Trim-WhitespaceLike -Text $promptText)) {
           Send-TgMessage -cfg $cfg -ChatId $ChatId -Text 'Unknown command. Send help for usage.'
           return
         }
-        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $promptText; session = 'default'; auto_start = $true }
-        if ($resp.ok) {
-          $out = $resp.result.output
-          $jobId = $null
-          $jobPid = $null
-          if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-          if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-          if ($jobId -and $jobPid) {
-            Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-            Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
-          } else {
-            if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-            Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
-          }
-        } else {
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        $queuePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+        $queueText = if ($routeWasExplicit) { $raw } else { ("{0} {1}" -f $queuePrefix, $promptText) }
+        $laneResp = Invoke-LaneExecPrompt -Prompt $promptText -ForceNew:$false -QueuedCommandText $queueText
+        if (-not $laneResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+        if ($laneResp.queued) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+        if ($laneResp.has_job) {
+          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id) [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+          return
         }
+        $out = $laneResp.out
+        if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
         return
       }
       $lines = if ($rest -match '^\d+$') { [int]$rest } else { $null }
@@ -908,45 +1413,42 @@ function Handle-Command {
         return
       }
 
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $rest; session = 'default'; auto_start = $true }
-      if ($resp.ok) {
-        $out = $resp.result.output
-        $jobId = $null
-        $jobPid = $null
-        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-        if ($jobId -and $jobPid) {
-          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
-        } else {
-          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
-        }
-      } else {
-        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+      $queuePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+      $queueText = if ($routeWasExplicit) { $raw } else { ("{0} codex {1}" -f $queuePrefix, $rest) }
+      $laneResp = Invoke-LaneExecPrompt -Prompt $rest -ForceNew:$false -QueuedCommandText $queueText
+      if (-not $laneResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.queued) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.has_job) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id) [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+        return
       }
+      $out = $laneResp.out
+      if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
       return
     }
     'codexnew' {
-      $payload = @{ op = 'codex.new.exec' }
-      if ($rest) { $payload.prompt = $rest }
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
-      if ($resp.ok) {
-        $out = $resp.result.output
-        $jobId = $null
-        $jobPid = $null
-        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-        if ($jobId -and $jobPid) {
-          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId (new thread). I'll reply here when it's done.")
-        } else {
-          if (-not $out) { $out = "No output yet. Session: $($resp.result.session)." }
-          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+      if (-not $rest) {
+        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new.exec' }
+        if ($resp.ok) {
+          Clear-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneKey
         }
-      } else {
-        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        return
       }
+
+      $queuePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+      $queueText = if ($routeWasExplicit) { $raw } else { ("{0} codexnew {1}" -f $queuePrefix, $rest) }
+      $laneResp = Invoke-LaneExecPrompt -Prompt $rest -ForceNew:$true -QueuedCommandText $queueText
+      if (-not $laneResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.queued) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.has_job) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id) (new thread) [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+        return
+      }
+      $out = $laneResp.out
+      if (-not $out) { $out = 'No output yet.' }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
       return
     }
     'codexexec' {
@@ -959,30 +1461,20 @@ function Handle-Command {
         return
       }
 
-      if ($parsed.action -eq 'new') {
-        $payload = @{ op = 'codex.new.exec' }
-        if ($parsed.prompt) { $payload.prompt = $parsed.prompt }
-        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
-      } else {
-        $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $parsed.prompt }
+      $queuePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+      $queueText = if ($routeWasExplicit) { $raw } else { ("{0} codexexec {1}" -f $queuePrefix, $rest) }
+      $forceNew = ($parsed.action -eq 'new')
+      $laneResp = Invoke-LaneExecPrompt -Prompt $parsed.prompt -ForceNew:$forceNew -QueuedCommandText $queueText
+      if (-not $laneResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.queued) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.has_job) {
+        $tag = if ($forceNew) { ' (new thread)' } else { '' }
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id)$tag [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+        return
       }
-
-      if ($resp.ok) {
-        $out = $resp.result.output
-        $jobId = $null
-        $jobPid = $null
-        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-        if ($jobId -and $jobPid) {
-          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
-        } else {
-          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
-        }
-      } else {
-        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
-      }
+      $out = $laneResp.out
+      if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
       return
     }
     'codexconsole' {
@@ -1128,25 +1620,27 @@ function Handle-Command {
       try { $null = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.cancel' } } catch {}
       $modeResp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' }
       if (-not $modeResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $modeResp); return }
-      $payload = @{ op = 'codex.new.exec' }
-      if ($rest) { $payload.prompt = $rest }
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload $payload
-      if ($resp.ok) {
-        $out = $resp.result.output
-        $jobId = $null
-        $jobPid = $null
-        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-        if ($jobId -and $jobPid) {
-          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId (fresh). I'll reply here when it's done.")
-        } else {
-          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
+      if (-not $rest) {
+        $resetResp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.new.exec' }
+        if ($resetResp.ok) {
+          Clear-LaneSessionId -cfg $cfg -state $state -ChatId $ChatId -Target $target -LaneKey $laneKey
         }
-      } else {
-        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resetResp)
+        return
       }
+
+      $queuePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+      $queueText = if ($routeWasExplicit) { $raw } else { ("{0} codexfresh {1}" -f $queuePrefix, $rest) }
+      $laneResp = Invoke-LaneExecPrompt -Prompt $rest -ForceNew:$true -QueuedCommandText $queueText
+      if (-not $laneResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.queued) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message; return }
+      if ($laneResp.has_job) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id) (fresh) [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+        return
+      }
+      $out = $laneResp.out
+      if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
       return
     }
     'codexfreshconsole' {
@@ -1271,8 +1765,8 @@ function Handle-Command {
     default {
       # Vanilla mode: if this isn't a known command, treat the message as a Codex prompt.
       $promptText = $raw
-      if ($cfg.Targets.ContainsKey($token1Lower) -and $rest1) {
-        # Preserve original casing/punctuation by using the original "rest after target" rather than normalized tokens.
+      if ($routeWasExplicit -and $rest1) {
+        # Preserve original casing/punctuation by using the original "rest after explicit route token".
         $promptText = $rest1
       }
       if (-not (Trim-WhitespaceLike -Text $promptText)) {
@@ -1280,23 +1774,28 @@ function Handle-Command {
         return
       }
 
-      $resp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.send.exec'; prompt = $promptText; session = 'default'; auto_start = $true }
-      if ($resp.ok) {
-        $out = $resp.result.output
-        $jobId = $null
-        $jobPid = $null
-        if ($resp.result -and $resp.result.job_id) { $jobId = [string]$resp.result.job_id }
-        if ($resp.result -and $resp.result.pid) { $jobPid = [string]$resp.result.pid }
-        if ($jobId -and $jobPid) {
-          Add-PendingCodexJob -JobId $jobId -Target $target -ChatId $ChatId
-          Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $jobId. I'll reply here when it's done.")
-        } else {
-          if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
-          Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
-        }
+      $queueText = if ($routeWasExplicit) {
+        $raw
       } else {
-        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $resp)
+        $routePrefix = if ($laneKey -and $laneKey -match '^id[1-9]\d*$') { $laneKey } else { $target }
+        ("{0} {1}" -f $routePrefix, $promptText)
       }
+      $laneResp = Invoke-LaneExecPrompt -Prompt $promptText -ForceNew:$false -QueuedCommandText $queueText
+      if (-not $laneResp.ok) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message
+        return
+      }
+      if ($laneResp.queued) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $laneResp.message
+        return
+      }
+      if ($laneResp.has_job) {
+        Send-TgMessage -cfg $cfg -ChatId $ChatId -Text ("Queued codex exec job $($laneResp.job_id) [lane=$(Get-LaneStatusLabel -LaneCandidate $laneKey -TargetCandidate $target)]. I'll reply here when it's done.")
+        return
+      }
+      $out = $laneResp.out
+      if (-not $out) { $out = "No output yet. Use '$target codexlast' in a moment." }
+      Send-ChunkedText -cfg $cfg -ChatId $ChatId -Text $out
       return
     }
   }
@@ -1323,6 +1822,7 @@ while ($true) {
   # If the agent is running Codex asynchronously, push completed jobs without requiring codexlast.
   try {
     Ensure-StateProperty -state $state -Name 'pending_codex_jobs' -Value @()
+    Ensure-StateProperty -state $state -Name 'pending_codex_prompts' -Value @()
     $pending = @()
     try { $pending = @($state.pending_codex_jobs) } catch { $pending = @() }
     if ($pending.Count -gt 0) {
@@ -1332,22 +1832,99 @@ while ($true) {
         $jobId = $null
         $tgt = $cfg.DefaultTarget
         $cid = $null
+        $laneKey = ''
         try { $jobId = [string]$j.job_id } catch {}
         try { if ($j.target) { $tgt = [string]$j.target } } catch {}
         try { $cid = [string]$j.chat_id } catch {}
+        try { if ($j.lane_key) { $laneKey = [string]$j.lane_key } } catch {}
         if (-not $cid) { continue }
 
         $jr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload @{ op = 'codex.job' }
         if (-not $jr.ok) { $remaining += $j; continue }
         $job = $jr.result.job
-        if (-not $job) { $remaining += $j; continue }
-        if ($jobId -and $job.id -and ($job.id -ne $jobId)) { $remaining += $j; continue }
-        if ($job.running) { $remaining += $j; continue }
+        $currentJobId = $null
+        $currentJobRunning = $false
+        if ($job) {
+          try { if ($job.id) { $currentJobId = [string]$job.id } } catch {}
+          try { $currentJobRunning = [bool]$job.running } catch { $currentJobRunning = $false }
+        }
+        if ($jobId -and $currentJobId -and ($jobId -eq $currentJobId) -and $currentJobRunning) {
+          $remaining += $j
+          continue
+        }
 
-        $lr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload @{ op = 'codex.last'; session = 'default' }
-        Send-ChunkedText -cfg $cfg -ChatId $cid -Text (Format-ResultText $lr)
+        $lrPayload = @{ op = 'codex.last'; session = 'default' }
+        if ($jobId) { $lrPayload.job_id = $jobId }
+        $lr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload $lrPayload
+        if (-not $lr.ok) {
+          $remaining += $j
+          continue
+        }
+        $outText = Format-ResultText $lr
+        if ($lr.ok -and $laneKey) {
+          $sid = Try-ExtractCodexSessionIdFromText -Text $outText
+          if ($sid) {
+            Set-LaneSessionId -cfg $cfg -state $state -ChatId $cid -Target $tgt -LaneKey $laneKey -SessionId $sid
+          }
+        }
+        $laneLabel = if ($laneKey) { $laneKey } else { $tgt }
+        $jobLabel = if ($jobId) { $jobId } else { 'n/a' }
+        $prefix = "[telebot] lane: $laneLabel | target: $tgt | job_id: $jobLabel"
+        if ($outText) { $outText = "$prefix`n`n$outText" } else { $outText = $prefix }
+        Send-ChunkedText -cfg $cfg -ChatId $cid -Text $outText
       }
       $state.pending_codex_jobs = $remaining
+      Save-State -cfg $cfg -state $state
+    }
+
+    $queuedPrompts = @()
+    try { $queuedPrompts = @($state.pending_codex_prompts) } catch { $queuedPrompts = @() }
+    if ($queuedPrompts.Count -gt 0) {
+      $keepQueued = @()
+      $dispatchedTargets = New-Object 'System.Collections.Generic.HashSet[string]'
+      foreach ($qp in ($queuedPrompts | Sort-Object queued_at)) {
+        if (-not $qp) { continue }
+        $qid = ''
+        $tgt = $cfg.DefaultTarget
+        $cid = ''
+        $cmdText = ''
+        try { if ($qp.id) { $qid = [string]$qp.id } } catch {}
+        try { if ($qp.target) { $tgt = [string]$qp.target } } catch {}
+        try { if ($qp.chat_id) { $cid = [string]$qp.chat_id } } catch {}
+        try { if ($qp.command_text) { $cmdText = [string]$qp.command_text } } catch {}
+
+        if (-not $cid -or -not $cmdText) { continue }
+        if (-not $cfg.Targets.ContainsKey($tgt)) {
+          Send-TgMessage -cfg $cfg -ChatId $cid -Text ("Dropped queued prompt {0}: target '{1}' is no longer configured." -f $qid, $tgt)
+          continue
+        }
+        if ($dispatchedTargets.Contains($tgt)) {
+          $keepQueued += $qp
+          continue
+        }
+
+        $jr = Send-AgentRequest -cfg $cfg -Target $tgt -Payload @{ op = 'codex.job' }
+        if (-not $jr.ok) {
+          $keepQueued += $qp
+          continue
+        }
+        $job = $jr.result.job
+        if ($job -and $job.running) {
+          $keepQueued += $qp
+          continue
+        }
+
+        Write-BotLog -Path $cfg.BotLog -Message ("dispatch queued prompt id={0} target={1}" -f $qid, $tgt)
+        try {
+          Handle-Command -cfg $cfg -state $state -ChatId $cid -Text $cmdText
+        } catch {
+          Write-BotLog -Path $cfg.BotLog -Message ("queued dispatch failed id={0}: {1}" -f $qid, $_.Exception.Message)
+          $keepQueued += $qp
+          continue
+        }
+        $null = $dispatchedTargets.Add($tgt)
+      }
+      $state.pending_codex_prompts = $keepQueued
       Save-State -cfg $cfg -state $state
     }
   } catch {
@@ -1424,10 +2001,12 @@ while ($true) {
     if ((($now - $script:LastHeartbeatAt).TotalSeconds) -ge $cfg.ConsoleHeartbeatSec) {
       $pendingCount = 0
       try { $pendingCount = @($state.pending_codex_jobs).Count } catch { $pendingCount = 0 }
+      $queuedPromptCount = 0
+      try { $queuedPromptCount = @($state.pending_codex_prompts).Count } catch { $queuedPromptCount = 0 }
       $last = if ($script:LastMessageAt) { $script:LastMessageAt.ToString('HH:mm:ss') } else { 'never' }
       $off = 0
       try { $off = [int]$state.last_update_id } catch { $off = 0 }
-      Write-Console ("[{0}] heartbeat: last_msg={1} pending={2} offset={3} 409s={4}" -f $now.ToString('HH:mm:ss'), $last, $pendingCount, $off, $script:Consecutive409)
+      Write-Console ("[{0}] heartbeat: last_msg={1} pending_jobs={2} queued_prompts={3} offset={4} 409s={5}" -f $now.ToString('HH:mm:ss'), $last, $pendingCount, $queuedPromptCount, $off, $script:Consecutive409)
       $script:LastHeartbeatAt = $now
     }
   }

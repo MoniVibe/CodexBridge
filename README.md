@@ -38,6 +38,8 @@ pwsh -NoProfile -File .\broker.ps1
 
 ## Telegram Commands
 Target prefix is optional:
+- `idN <prompt>`: route to lane `idN` on the current active target (`id1`, `id2`, ...). Lanes keep separate Codex sessions per chat.
+- `<target> <prompt>`: set active target explicitly (`pc`, `lap`, etc.); lane stays independent.
 - `[<target>] codex <prompt>`: send prompt to the exec thread (default)
 - `[<target>] codexnew [prompt]`: fresh exec thread (no resume). With no prompt, resets the exec session.
 - `[<target>] codexfresh [prompt]`: start a fresh exec session (never console). Cancels any running exec job first. If a prompt is provided, it runs it.
@@ -54,6 +56,10 @@ Target prefix is optional:
 - `[<target>] codexcancel` (alias: `cancel`): cancel the running Codex job (async mode)
 - `[<target>] codexuse <thread_id>`: resume a specific thread id (alias: `codexresume`)
 - `[<target>] codexreset`: clear stored thread id
+- `[<target>] ai diag <run_id>`: advisory diag summary from HeadlessRebuildTool sidecar (read-only)
+- `[<target>] ai route <run_id>`: advisory next-lane routing (read-only)
+- `[<target>] ai scoreboard <path>`: advisory headline/risk summary for a scoreboard file or folder (read-only)
+- `[<target>] ai capabilities [command]`: show machine-readable AI sidecar command contracts (read-only)
 - `[<target>] status`: show agent status
 - `[<target>] skills list|info <name>|doctor|run <name> [args...]`: run/manage local Codex skills (reads from `C:\Users\<you>\.codex\skills`)
 
@@ -61,6 +67,12 @@ Default: if the message does not start with a known command/target, it is treate
 `<DEFAULT_TARGET> codex <text>`.
 
 Convenience: `[<target>] codex status|job|cancel|last|session` are treated as control commands (not prompts).
+
+Session ID policy:
+- Do not hardcode a specific `codex_session_id` in automation or prompts.
+- `session=default` in broker/agent requests is a logical lane key, not a pinned Codex thread id.
+- The agent resolves/persists the active Codex thread id in process state and can rotate it between sessions.
+- Use `codexsession` to inspect, `codexnew`/`codexfresh` to rotate fresh, and `codexuse <thread_id>` only for intentional resume.
 
 Async QoL:
 - If `CODEX_ASYNC=1`, the broker immediately acknowledges with a job id and automatically posts the final Codex output when the job completes (no need to poll `codexlast`).
@@ -79,6 +91,13 @@ If you omit `<target>`, broker uses `DEFAULT_TARGET`.
 - Set `CODEX_CWD` to your preferred working directory.
 - Set `CODEX_MODEL` and `CODEX_REASONING_EFFORT` to force model selection.
 - Set `CODEX_ASYNC=1` to queue Codex runs so the agent stays responsive.
+- AI sidecar commands (`ai ...`) do not require Codex and run through HeadlessRebuildTool's Node sidecar.
+- Set `HEADLESS_REBUILD_TOOL_ROOT` in `agent.env` if your tools repo is not at `C:\dev\Tri\Tools\HeadlessRebuildTool`.
+- Ensure sidecar dependencies are installed once:
+  - `cd C:\dev\Tri\Tools\HeadlessRebuildTool\Tools\AI`
+  - `npm install`
+- `OPENAI_API_KEY` enables model calls. Without it, sidecar returns offline heuristic outputs.
+- To force offline/disable model calls: set `AI_SIDECAR_FORCE_OFFLINE=1` in the environment used by `agent.ps1`.
 - Console mode is optional: set `CODEX_MODE=console` and start `codex_console.ps1`.
   - Use `codexconsole new <prompt>` or `codexfreshconsole <prompt>` to restart the console and send a fresh prompt.
   - `codexconsole` with no prompt just restarts the console (useful for resuming manually).
