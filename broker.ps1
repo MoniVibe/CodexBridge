@@ -75,6 +75,7 @@ function Get-Config {
     ExitOn409Threshold = 3
     ConsoleFallbackExec = $false
     ConsoleHeartbeatSec = 0
+    LaneIdRouteMode = 'lane'
   }
 
   Import-DotEnv -Path $ConfigPath
@@ -101,6 +102,7 @@ function Get-Config {
   if ($env:BROKER_STATE_FILE) { $cfg.StateFile = $env:BROKER_STATE_FILE }
   if ($env:BROKER_HEARTBEAT_SEC) { $cfg.ConsoleHeartbeatSec = [int]$env:BROKER_HEARTBEAT_SEC }
   elseif ($env:TELEBOT_HEARTBEAT_SEC) { $cfg.ConsoleHeartbeatSec = [int]$env:TELEBOT_HEARTBEAT_SEC }
+  if ($env:LANE_ID_ROUTE_MODE) { $cfg.LaneIdRouteMode = $env:LANE_ID_ROUTE_MODE.ToLowerInvariant() }
 
   $all = [System.Environment]::GetEnvironmentVariables()
   foreach ($key in $all.Keys) {
@@ -137,6 +139,7 @@ function Get-Config {
   # Normalize DEFAULT_TARGET: keep lower-case and ensure it exists.
   if (-not $cfg.DefaultTarget) { $cfg.DefaultTarget = '' }
   $cfg.DefaultTarget = $cfg.DefaultTarget.ToLowerInvariant()
+  if (@('lane','target') -notcontains $cfg.LaneIdRouteMode) { $cfg.LaneIdRouteMode = 'lane' }
   if (-not $cfg.Targets.ContainsKey($cfg.DefaultTarget)) {
     if ($cfg.Targets.ContainsKey('local')) { $cfg.DefaultTarget = 'local' }
     else { $cfg.DefaultTarget = ($cfg.Targets.Keys | Sort-Object | Select-Object -First 1) }
@@ -544,7 +547,8 @@ function Send-CodexConfigPanel {
   $reasoning = if ($snap.reasoning_raw) { $snap.reasoning_raw } else { 'default' }
   $targets = @($cfg.Targets.Keys | Sort-Object)
   $targetsText = if ($targets.Count -gt 0) { $targets -join ', ' } else { '(none)' }
-  $text = "[telebot] target: $Target`nmode: $mode`nmodel: $model`nreasoning: $reasoning`ntargets: $targetsText`nlanes: idN (id1, id2, ...) on active target`n`nExec is default for prompts. Use idN prefixes for lane routing."
+  $laneText = Get-LaneRoutingDescription -cfg $cfg
+  $text = "[telebot] target: $Target`nmode: $mode`nmodel: $model`nreasoning: $reasoning`ntargets: $targetsText`nlanes: $laneText`n`nExec is default for prompts. Use idN prefixes for lane routing."
   if ($Notice) { $text = $Notice + "`n`n" + $text }
   $markup = New-CodexConfigMarkup -Target $Target -ModelRaw $snap.model_raw -ReasoningRaw $snap.reasoning_raw -ModeRaw $snap.mode_raw
   Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $text -ReplyMarkup $markup
@@ -679,6 +683,14 @@ function Resolve-TargetAlias {
   if (-not $m.Success) { return @{ ok = $false; target = $null; is_id = $false; id = 0; alias = '' } }
 
   $id = [int]$m.Groups[1].Value
+  if ($cfg.LaneIdRouteMode -eq 'target') {
+    $keys = @(Get-SortedTargetKeys -cfg $cfg)
+    if ($id -ge 1 -and $id -le $keys.Count) {
+      return @{ ok = $true; target = [string]$keys[$id - 1]; is_id = $true; id = $id; alias = ("id{0}" -f $id) }
+    }
+    return @{ ok = $false; target = $null; is_id = $true; id = $id; alias = ("id{0}" -f $id) }
+  }
+
   $targetResolved = $null
   $fallbackNorm = (Normalize-Token -Token $FallbackTarget).ToLowerInvariant()
   if ($fallbackNorm -and $cfg.Targets.ContainsKey($fallbackNorm)) {
@@ -714,6 +726,14 @@ function Get-TargetIdLabel {
     if ([string]$keys[$i] -eq $targetNorm) { return ("id{0}" -f ($i + 1)) }
   }
   return $null
+}
+
+function Get-LaneRoutingDescription {
+  param($cfg)
+  if ($cfg.LaneIdRouteMode -eq 'target') {
+    return ("idN routes to targets ({0})" -f (Get-TargetIdMapText -cfg $cfg))
+  }
+  return 'idN routes to lanes on the active target'
 }
 
 function Ensure-ChatTargetMap {
@@ -1208,7 +1228,8 @@ function Handle-Command {
   switch ($cmd) {
     'help' {
       $activeTarget = if ($target) { $target } else { $cfg.DefaultTarget }
-      $msg = "Default: plain text is sent to Codex exec on the active target. Active target (this chat): $activeTarget. Targets: $($cfg.Targets.Keys -join ', '). Lanes: idN (id1, id2, ...) on the active target. Use idN <prompt> or <target> <prompt>; the last explicit id/target becomes sticky for this chat. idN lanes on the same target keep separate sessions; when target is busy, prompts are queued per lane. Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | ai diag <run_id> | ai route <run_id> | ai scoreboard <path> | ai capabilities [command] | skills list|info <name>|doctor|run <name> [args...] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
+      $laneText = Get-LaneRoutingDescription -cfg $cfg
+      $msg = "Default: plain text is sent to Codex exec on the active target. Active target (this chat): $activeTarget. Targets: $($cfg.Targets.Keys -join ', '). Lanes: $laneText. Use idN <prompt> or <target> <prompt>; the last explicit id/target becomes sticky for this chat. When target is busy, prompts are queued per lane. Commands: [<target>] codex <prompt> | codexnew [prompt] | codexfresh [prompt] | codexfreshconsole [prompt] | codexsession | codexjob | codexcancel (alias: cancel) | codexmodel [model] [reset] (alias: model) | codexreasoning [low|medium|high|xhigh|default] [reset] (alias: reasoning) | codexconfig (alias: config) | codexuse <session> (alias: codexresume) | codexreset | codexstart [session] | codexstop [session] | codexlist | codexlast [lines] | codexexec [new] [prompt] | codexconsole [new] [prompt] (alias: console) | codexconsoleexec [new] [prompt] | ai diag <run_id> | ai route <run_id> | ai scoreboard <path> | ai capabilities [command] | skills list|info <name>|doctor|run <name> [args...] | run <cmd> | last [lines] | tail <jobId> [lines] | get <jobId> | status"
       Send-TgMessage -cfg $cfg -ChatId $ChatId -Text $msg
       return
     }
@@ -1617,7 +1638,6 @@ function Handle-Command {
     }
     'codexfresh' {
       # Always start a fresh exec session (never console). Optional prompt.
-      try { $null = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.cancel' } } catch {}
       $modeResp = Send-AgentRequest -cfg $cfg -Target $target -Payload @{ op = 'codex.mode'; mode = 'exec' }
       if (-not $modeResp.ok) { Send-TgMessage -cfg $cfg -ChatId $ChatId -Text (Format-ResultText $modeResp); return }
       if (-not $rest) {

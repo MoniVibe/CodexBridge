@@ -850,6 +850,7 @@ function Load-State {
   if (Test-Path -LiteralPath $cfg.StateFile) {
     try {
       $obj = Get-Content -LiteralPath $cfg.StateFile -Raw | ConvertFrom-Json
+      if ($obj -is [System.Collections.IDictionary]) { $obj = [pscustomobject]$obj }
       Ensure-StateProperty -state $obj -Name 'last_job_id' -Value $null
       Ensure-StateProperty -state $obj -Name 'codex_has_session' -Value $false
       Ensure-StateProperty -state $obj -Name 'codex_last_log' -Value $null
@@ -879,7 +880,7 @@ function Load-State {
       return $obj
     } catch {}
   }
-  $obj = [ordered]@{
+  $obj = [pscustomobject][ordered]@{
     last_job_id = $null
     codex_has_session = $false
     codex_last_log = $null

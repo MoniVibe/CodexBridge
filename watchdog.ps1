@@ -47,7 +47,23 @@ function Is-RunningByScript {
   try {
     $leaf = [System.IO.Path]::GetFileName($ScriptName)
     if ($leaf -ieq 'agent.ps1') {
-      $pidFiles = Get-ChildItem -Path (Join-Path $repoDir 'logs') -Filter 'agent_*.pid' -ErrorAction SilentlyContinue
+      $targetPort = 0
+      if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
+        try {
+          $line = Get-Content -LiteralPath $ConfigPath -ErrorAction SilentlyContinue | Where-Object { $_ -match '^LISTEN_PORT\s*=\s*\d+' } | Select-Object -First 1
+          if ($line -match '^LISTEN_PORT\s*=\s*(\d+)') { $targetPort = [int]$Matches[1] }
+        } catch {}
+      }
+
+      $pidFiles = @()
+      if ($targetPort -gt 0) {
+        $pf = Join-Path (Join-Path $repoDir 'logs') ("agent_{0}.pid" -f $targetPort)
+        if (Test-Path -LiteralPath $pf) {
+          try { $pidFiles += Get-Item -LiteralPath $pf -ErrorAction SilentlyContinue } catch {}
+        }
+      } else {
+        $pidFiles = Get-ChildItem -Path (Join-Path $repoDir 'logs') -Filter 'agent_*.pid' -ErrorAction SilentlyContinue
+      }
       foreach ($pf in $pidFiles) {
         $pidText = (Get-Content -Raw $pf.FullName -ErrorAction SilentlyContinue).Trim()
         $procId = 0
@@ -227,6 +243,9 @@ try {
 $startConsoleAgent = $false
 if ($env:TELEBOT_WATCHDOG_START_CONSOLE_AGENT) {
   $startConsoleAgent = Is-Truthy -Value $env:TELEBOT_WATCHDOG_START_CONSOLE_AGENT
+} elseif (Test-Path -LiteralPath $consoleEnv) {
+  # If a console/secondary agent config is present, auto-manage it by default.
+  $startConsoleAgent = $true
 }
 
 while ($true) {
